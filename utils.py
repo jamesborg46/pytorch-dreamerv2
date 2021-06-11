@@ -1,40 +1,203 @@
 from garage.torch.policies.stochastic_policy import StochasticPolicy
 from garage import EnvSpec
 from garage.torch import global_device
+from garage.sampler.env_update import EnvUpdate
+import collections.abc
 import gym
 import json
+import math
 import torch
 import os
-
-# import safety_gym
-# from wrappers import SafetyEnvStateAppender
-
+import os.path as osp
+import ray
+import wandb
+import numpy as np
 
 from ruamel.yaml import YAML
 from dotmap import DotMap
-yaml = YAML()
-with open('./config.yaml', 'r') as f:
-    CONFIG = DotMap(yaml.load(f))
+from video import export_video
+
+def update(d, u):
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+def set_config(config_type='defaults'):
+    """Set GPU mode and device ID.
+
+    Args:
+        mode (bool): Whether or not to use GPU
+        gpu_id (int): GPU ID
+
+    """
+    # pylint: disable=global-statement
+    global _CONFIG
+
+    yaml = YAML()
+    with open('./config.yaml', 'r') as f:
+        base = DotMap(yaml.load(f))
+        if config_type == 'defaults':
+            _CONFIG = base.defaults
+        else:
+            assert config_type in base.keys()
+            _CONFIG = update(base.defaults, base[config_type])
+
+def get_config():
+    global _CONFIG
+    return _CONFIG
+
+
+class EnvConfigUpdate(EnvUpdate):
+
+    def __init__(self,
+                 enable_render=False,
+                 file_prefix=""):
+
+        self.enable_render = enable_render
+        self.file_prefix = file_prefix
+
+    def __call__(self, old_env):
+        old_env.enable_rendering(self.enable_render,
+                                 file_prefix=self.file_prefix)
+        return old_env
+
+
+class CloseRenderer(EnvUpdate):
+
+    def __call__(self, old_env):
+        old_env.close_renderer()
+        return old_env
+
+
+def log_episodes(itr,
+                 snapshot_dir,
+                 sampler,
+                 policy,
+                 number_eps=None,
+                 enable_render=False,
+                 ):
+
+    if hasattr(sampler, '_worker_factory'):
+        n_workers = sampler._worker_factory.n_workers
+    else:
+        n_workers = sampler._factory.n_workers
+
+    n_eps_per_worker = (
+        1 if number_eps is None else math.ceil(number_eps / n_workers)
+    )
+
+    env_updates = []
+
+    for i in range(n_workers):
+        env_updates.append(EnvConfigUpdate(
+            enable_render=enable_render,
+            file_prefix=f"epoch_{itr:04}_worker_{i:02}"
+        ))
+
+    sampler._update_workers(
+        env_update=env_updates,
+        agent_update=policy
+    )
+
+    episodes = sampler.obtain_exact_episodes(
+        n_eps_per_worker=n_eps_per_worker,
+        agent_update=policy
+    )
+
+    if enable_render:
+        env_updates = [CloseRenderer() for _ in range(n_workers)]
+
+        updates = sampler._update_workers(
+            env_update=env_updates,
+            agent_update=policy
+        )
+
+        while updates:
+            ready, updates = ray.wait(updates)
+
+    if enable_render:
+        for episode in episodes.split():
+            video_file = episode.env_infos['video_filename'][0]
+            assert '.mp4' in video_file
+            wandb.log({
+                os.path.basename(video_file): wandb.Video(video_file),
+            }, step=itr)
+
+    return episodes
+
+
+def log_reconstructions(eps,
+                        env_spec,
+                        world_model,
+                        itr,
+                        path):
+
+    with torch.no_grad():
+        lengths = eps.lengths
+        obs = (torch.tensor(eps.observations).type(torch.float)
+               .unsqueeze(1)).to(global_device()) / 255 - 0.5
+        actions = (torch.tensor(env_spec.action_space.flatten_n(eps.actions))
+                   .type(torch.float)).to(global_device())
+
+        image_recon = world_model.reconstruct(obs, actions).cpu().numpy()
+        image_recon = np.transpose(image_recon, (0, 2, 3, 1))
+        original_obs = np.transpose(obs.cpu().numpy(), (0, 2, 3, 1))
+
+        if original_obs.shape[-1] == 1:
+            image_recon = np.tile(image_recon, (1, 1, 1, 3))
+            original_obs = np.tile(original_obs, (1, 1, 1, 3))
+
+        original_obs = (original_obs + 0.5) * 255
+        image_recon = np.clip((image_recon + 0.5) * 255, 0, 255)
+        original_obs = original_obs.astype(np.uint8)
+        image_recon = image_recon.astype(np.uint8)
+
+        side_by_side = np.concatenate([original_obs, image_recon], axis=2)
+        start = 0
+        for i, length in enumerate(lengths):
+            fname = osp.join(path, f'reconstructed_{itr}_{i}.mp4')
+            export_video(
+                frames=side_by_side[start:start+length, ::-1],
+                fname=fname,
+                fps=5
+            )
+            start += length
+
+            wandb.log({
+                os.path.basename(fname): wandb.Video(fname),
+            }, step=itr)
 
 
 def segs_to_batch(segs, env_spec):
+
     device = global_device()
-    obs = torch.tensor(
-        [seg.next_observations for seg in segs]).type(torch.float).to(device)
-    if CONFIG.image.color_channels == 1:
+    obs = []
+    actions = []
+    rewards = []
+    discounts = []
+
+    for seg in segs:
+        obs.append(seg.next_observations)
+        actions.append(env_spec.action_space.flatten_n(seg.actions))
+        rewards.append(seg.rewards)
+        discounts.append(1 - seg.terminals)
+
+    obs = torch.tensor(np.array(obs), device=device, dtype=torch.float)
+    if _CONFIG.image.color_channels == 1:
         obs = obs.unsqueeze(2)
     obs = obs / 255 - 0.5
 
     actions = torch.tensor(
-        [env_spec.action_space.flatten_n(seg.actions) for seg in segs]
-    ).type(torch.float).to(device)
+        np.array(actions), device=device, dtype=torch.float)
 
     rewards = torch.tensor(
-        [seg.rewards for seg in segs]).type(torch.float).to(device)
+        np.array(rewards), device=device, dtype=torch.float)
 
-    discounts = (
-        1 - torch.tensor([seg.terminals for seg in segs]).type(torch.float)
-    ).to(device)
+    discounts = torch.tensor(
+        np.array(discounts), device=device, dtype=torch.float)
 
     return obs, actions, rewards, discounts
 
@@ -84,18 +247,3 @@ class RandomPolicy(StochasticPolicy):
 def preprocess_img(img):
     return img / 255.
 
-
-# def make_env(env_id, snapshot_dir):
-#     env = gym.make(env_id)
-#     is_safety_gym_env = isinstance(env, safety_gym.envs.engine.Engine)
-
-#     if is_safety_gym_env:
-#         config = env.config
-
-#         with open(os.path.join(snapshot_dir, 'config.json'), 'w') \
-#                 as outfile:
-#             json.dump(config, outfile)
-
-#         env = SafetyEnvStateAppender(env)
-
-#     env.metadata['render.modes'] = ['rgb_array']

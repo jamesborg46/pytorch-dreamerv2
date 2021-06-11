@@ -4,10 +4,11 @@ from garage.np.algos import RLAlgorithm
 from utils import RandomPolicy
 from math import ceil
 from garage.sampler import LocalSampler
-from utils import CONFIG, segs_to_batch
+from utils import get_config, segs_to_batch, log_episodes, log_reconstructions
 from torch import optim
 from garage.torch import global_device
 from tqdm import tqdm
+import os.path as osp
 
 
 class Dreamer(RLAlgorithm):
@@ -15,6 +16,7 @@ class Dreamer(RLAlgorithm):
     def __init__(self,
                  env_spec: EnvSpec,
                  sampler,
+                 log_sampler,
                  world_model,
                  agent,
                  buf,
@@ -23,14 +25,16 @@ class Dreamer(RLAlgorithm):
         device = global_device()
         self.env_spec = env_spec
         self._sampler = sampler
+        self._log_sampler = log_sampler
         self.world_model = world_model.to(device)
         self.agent = agent
         self.buffer = buf
 
-        self._num_segs_per_batch = CONFIG.training.num_segs_per_batch
-        self._num_training_steps = CONFIG.training.num_training_steps
+        self.log_vid_freq = get_config().logging.log_vid_freq
+        self._num_segs_per_batch = get_config().training.num_segs_per_batch
+        self._num_training_steps = get_config().training.num_training_steps
         self.optimizer = optim.Adam(self.world_model.parameters(),
-                                    lr=CONFIG.training.lr)
+                                    lr=get_config().training.lr)
 
     def train(self, trainer):
         """Obtain samplers and start actual training for each epoch.
@@ -55,6 +59,7 @@ class Dreamer(RLAlgorithm):
                 agent_update=self.agent,
             )
             self.buffer.collect(eps)
+            self.buffer.log_stats(trainer.step_itr)
 
             logger.log('TRAINING')
             for j in tqdm(range(self._num_training_steps)):
@@ -67,8 +72,9 @@ class Dreamer(RLAlgorithm):
                 )
 
                 logger.log(tabular)
-                logger.dump_all(i*self._num_training_steps+j)
+                logger.dump_all(trainer.step_itr)
                 tabular.clear()
+                trainer.step_itr += 1
 
                 # Each should be SEGS x STEPS x ... in shape
 
@@ -76,6 +82,25 @@ class Dreamer(RLAlgorithm):
                 # Update rssm_model params
                 #
                 # Behaviour learning
+                #
+
+            if i and i % self.log_vid_freq == 0:
+
+                eps = log_episodes(
+                    trainer.step_itr,
+                    trainer._snapshotter.snapshot_dir,
+                    sampler=self._log_sampler,
+                    policy=self.agent,
+                    enable_render=True,
+                )
+
+                log_reconstructions(
+                    eps,
+                    self.env_spec,
+                    self.world_model,
+                    trainer.step_itr,
+                    path=osp.join(trainer._snapshotter.snapshot_dir, 'videos')
+                )
 
     def train_world_model_once(self, obs, actions, rewards, discounts):
 

@@ -21,7 +21,8 @@ import gym.envs.atari
 from replay_buffer import ReplayBuffer # noqa: F401
 from dreamer import Dreamer
 from models import WorldModel
-from utils import CONFIG, RandomPolicy
+from wrappers import Renderer
+from utils import set_config, get_config, RandomPolicy
 
 import time
 import os
@@ -36,6 +37,8 @@ def dreamer(ctxt):
 
     snapshot_dir = ctxt.snapshot_dir
 
+    CONFIG = get_config()
+
     env = gym.envs.atari.AtariEnv(
         CONFIG.env.name, obs_type='image', frameskip=1,
         repeat_action_probability=0.25, full_action_space=False)
@@ -46,6 +49,7 @@ def dreamer(ctxt):
         env = Grayscale(env)
     env = Resize(env, CONFIG.image.height, CONFIG.image.height)
     max_episode_length = 108000 / 4
+    env = Renderer(env, directory=os.path.join(snapshot_dir, 'videos'))
     env = GymEnv(env, max_episode_length=max_episode_length, is_image=True)
 
     set_seed(CONFIG.training.seed)
@@ -69,16 +73,17 @@ def dreamer(ctxt):
                       max_episode_length=max_episode_length,
                       n_workers=4)
 
-#     log_sampler = Sampler(agents=policy,  # noqa: F841
-#                           envs=env,
-#                           max_episode_length=kwargs['max_episode_length'],
-#                           n_workers=kwargs['n_workers'])
+    log_sampler = Sampler(agents=policy,  # noqa: F841
+                      envs=env,
+                      max_episode_length=max_episode_length,
+                      n_workers=4)
 
     set_gpu_mode(True)
 
     algo = Dreamer(
         env.spec,
         sampler=sampler,
+        log_sampler=log_sampler,
         world_model=world_model,
         agent=policy,
         buf=buf,
@@ -95,6 +100,7 @@ def dreamer(ctxt):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='preference reward learning')
     parser.add_argument('--name', type=str, required=True)
+    parser.add_argument('--config', type=str, default='defaults')
 
     torch.set_num_threads(4)
 
@@ -104,6 +110,8 @@ if __name__ == '__main__':
     kwargs['name'] = (
         kwargs['name'] + '_' + time.ctime().replace(' ', '_')
     )
+
+    set_config(kwargs['config'])
 
     experiment_dir = os.getenv('EXPERIMENT_LOGS',
                                default=os.path.join(os.getcwd(), 'experiment'))
@@ -115,7 +123,7 @@ if __name__ == '__main__':
         dowel.WandbOutput(
             project='dreamer',
             name=args['name'],
-            config=CONFIG,
+            config=get_config(),
         )
     )
 

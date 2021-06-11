@@ -3,26 +3,42 @@ import torch.nn.functional as F
 from torch import nn
 from torch import distributions
 from torch.distributions import kl_divergence, Independent
+from torch.distributions.utils import logits_to_probs
+from torch._six import inf
 import torch.nn.functional as F
 from garage.torch import global_device
-from utils import CONFIG
+from utils import get_config
+from dowel import logger
 
-def categorical_kl(probs_a, probs_b):
-    return torch.sum(probs_a * torch.log(probs_a / probs_b), dim=[-1, -2])
+# def categorical_kl(probs_a, probs_b):
+#     return torch.sum(probs_a * torch.log(probs_a / probs_b), dim=[-1, -2])
+
+
+def categorical_kl(logits_p, logits_q):
+    probs_p = logits_to_probs(logits_p)
+    probs_q = logits_to_probs(logits_q)
+    t = probs_p * (logits_p - logits_q)
+    t[(probs_q == 0).expand_as(t)] = inf
+    t[(probs_p == 0).expand_as(t)] = 0
+    return t.sum(dim=[-1, -2])
 
 
 def kl_loss(posterior, prior):
-    lhs = categorical_kl(posterior.probs.detach(), prior.probs)
-    rhs = categorical_kl(posterior.probs, prior.probs.detach())
-    kl_loss = CONFIG.rssm.alpha * lhs + (1 - CONFIG.rssm.alpha) * rhs
+    lhs = categorical_kl(posterior.logits.detach(), prior.logits)
+    rhs = categorical_kl(posterior.logits, prior.logits.detach())
+    kl_loss = get_config().rssm.alpha * lhs + (1 - get_config().rssm.alpha) * rhs
 
-    assert torch.isclose(lhs, rhs).all()
+    if not torch.isclose(lhs, rhs).all():
+        max_dif = torch.max(torch.abs(lhs - rhs)).cpu().item()
+        logger._warn(f'LHS and RHS of KL differ by: {max_dif}')
 
     expected = kl_divergence(
         Independent(posterior, 1),
         Independent(prior, 1),)
 
-    assert torch.isclose(lhs, expected, atol=1e-4).all(), lhs - expected
+    if not torch.isclose(lhs, expected, atol=1e-5).all():
+        max_dif = torch.max(torch.abs(lhs - expected)).cpu().item()
+        logger._warn(f'LHS and RHS of KL differ by: {max_dif}')
 
     return kl_loss
 
@@ -38,19 +54,30 @@ class WorldModel(torch.nn.Module):
         self.image_decoder = ImageDecoder()
 
         self.feat_size = (
-            CONFIG.rssm.stoch_state_classes * CONFIG.rssm.stoch_state_size
-            + CONFIG.rssm.det_state_size
+            get_config().rssm.stoch_state_classes * get_config().rssm.stoch_state_size
+            + get_config().rssm.det_state_size
         )
 
         self.reward_predictor = MLP(
             input_shape=self.feat_size,
-            units=CONFIG.reward_head.units,
+            units=get_config().reward_head.units,
             dist='mse')
 
         self.discount_predictor = MLP(
             input_shape=self.feat_size,
-            units=CONFIG.discount_head.units,
+            units=get_config().discount_head.units,
             dist='bernoulli')
+
+    def reconstruct(self, observations, actions):
+        steps, channels, height, width = observations.shape
+        embedded_observations = self.image_encoder(
+            observations)
+        out = self.rssm.observe(embedded_observations.unsqueeze(0),
+                                actions.unsqueeze(0))
+        feats = out['feats'].reshape(steps, self.feat_size)
+        image_recon = self.image_decoder(feats).reshape(
+            steps, channels, height, width)
+        return image_recon
 
     def forward(self, observations, actions):
         segs, steps, channels, height, width = observations.shape
@@ -75,7 +102,7 @@ class WorldModel(torch.nn.Module):
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
         recon_loss = -out['image_recon_dist'].log_prob(observation_batch).mean()
-        loss = reward_loss + discount_loss + recon_loss + CONFIG.rssm.beta * kl_loss
+        loss = reward_loss + discount_loss + recon_loss + get_config().rssm.beta * kl_loss
         loss_info = {
             'kl_loss': kl_loss,
             'reward_loss': reward_loss,
@@ -98,11 +125,11 @@ class RSSM(torch.nn.Module):
         self._env_spec = env_spec
         self.action_size = env_spec.action_space.n
 
-        self.embed_size = CONFIG.rssm.embed_size
-        self.stoch_state_classes = CONFIG.rssm.stoch_state_classes
-        self.stoch_state_size = CONFIG.rssm.stoch_state_size
-        self.det_state_size = CONFIG.rssm.det_state_size
-        self.act = eval(CONFIG.rssm.act)
+        self.embed_size = get_config().image_encoder.N * 32
+        self.stoch_state_classes = get_config().rssm.stoch_state_classes
+        self.stoch_state_size = get_config().rssm.stoch_state_size
+        self.det_state_size = get_config().rssm.det_state_size
+        self.act = eval(get_config().rssm.act)
 
         self.register_parameter(
             name='cell_initial_state',
@@ -225,17 +252,17 @@ class ImageEncoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-        Activation = eval(CONFIG.image_encoder.Activation)
-        self.N = N = CONFIG.image_encoder.N
+        Activation = eval(get_config().image_encoder.Activation)
+        self.N = N = get_config().image_encoder.N
 
         self.model = nn.Sequential(
             nn.Conv2d(1, N*1, 4, 2),
             Activation(),
-            nn.Conv2d(32, N*2, 4, 2),
+            nn.Conv2d(N*1, N*2, 4, 2),
             Activation(),
-            nn.Conv2d(64, N*4, 4, 2),
+            nn.Conv2d(N*2, N*4, 4, 2),
             Activation(),
-            nn.Conv2d(128, N*8, 4, 2),
+            nn.Conv2d(N*4, N*8, 4, 2),
             Activation(),
         )
 
@@ -248,16 +275,16 @@ class ImageDecoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-        Activation = eval(CONFIG.image_decoder.Activation)
-        self.N = N = CONFIG.image_decoder.N
+        Activation = eval(get_config().image_decoder.Activation)
+        self.N = N = get_config().image_decoder.N
         self.shape = [
-            CONFIG.image.height,
-            CONFIG.image.width,
-            CONFIG.image.color_channels
+            get_config().image.height,
+            get_config().image.width,
+            get_config().image.color_channels
         ]
         feat_shape = (
-            CONFIG.rssm.stoch_state_classes * CONFIG.rssm.stoch_state_size
-            + CONFIG.rssm.det_state_size)
+            get_config().rssm.stoch_state_classes * get_config().rssm.stoch_state_size
+            + get_config().rssm.det_state_size)
 
         self.dense = nn.Linear(feat_shape, N*32)
         self.deconvolve = nn.Sequential(
@@ -268,7 +295,7 @@ class ImageDecoder(torch.nn.Module):
             nn.ConvTranspose2d(N*2, N, 6, 2),
             Activation(),
             nn.ConvTranspose2d(N, self.shape[-1], 6, 2),
-            nn.Sigmoid(),  # TODO: Check this
+            # nn.Sigmoid(),  # TODO: Check this
         )
 
     def forward(self, embed):

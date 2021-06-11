@@ -1,41 +1,87 @@
-env:
-  name: "breakout"
+defaults:
+  env:
+    name: "enduro"
 
-training:
-  seed: 42
-  lr: 0.0002
-  n_epochs: 10000
-  sampler: "local"
-  num_segs_per_batch: 50
-  seg_length: 50
-  num_training_steps: 10
+  training:
+    seed: 42
+    lr: 0.0002
+    n_epochs: 10000
+    sampler: "local"
+    num_segs_per_batch: 50
+    seg_length: 50
+    num_training_steps: 50
 
-rssm:
-  embed_size: 1024
-  stoch_state_classes: 32
-  stoch_state_size: 32
-  det_state_size: 200
-  alpha: 0.8
-  beta: 0.1
-  act: "nn.functional.elu"
+  logging:
+    log_vid_freq: 2
 
-reward_head:
-  units: [400, 400, 400, 400]
-  Activation: "torch.nn.ELU"
+  rssm:
+    stoch_state_classes: 32
+    stoch_state_size: 32
+    det_state_size: 400
+    alpha: 0.8
+    beta: 0.1
+    act: "nn.functional.elu"
 
-discount_head:
-  units: [400, 400, 400, 400]
-  Activation: "torch.nn.ELU"
+  reward_head:
+    units: [400, 400, 400, 400]
+    Activation: "torch.nn.ELU"
 
-image:
-  color_channels: 1
-  height: 64
-  width: 64
+  discount_head:
+    units: [400, 400, 400, 400]
+    Activation: "torch.nn.ELU"
 
-image_encoder:
-  Activation: "nn.ELU"
-  N: 32
+  image:
+    color_channels: 1
+    height: 64
+    width: 64
 
-image_decoder:
-  Activation: "nn.ELU"
-  N: 32
+  image_encoder:
+    Activation: "nn.ELU"
+    N: 32
+
+  image_decoder:
+    Activation: "nn.ELU"
+    N: 32
+
+debug:
+  training:
+    seed: 42
+    lr: 0.0002
+    n_epochs: 100
+    sampler: "local"
+    num_segs_per_batch: 5
+    seg_length: 20 
+    num_training_steps: 3 
+
+  rssm:
+    stoch_state_classes: 16
+    stoch_state_size: 16
+    det_state_size: 100
+    alpha: 0.8
+    beta: 0.1
+    act: "nn.functional.elu"
+
+  logging:
+    log_vid_freq: 1
+
+  reward_head:
+    units: [100, 100]
+    Activation: "torch.nn.ELU"
+
+  discount_head:
+    units: [100, 100]
+    Activation: "torch.nn.ELU"
+
+  image:
+    color_channels: 1
+    height: 64
+    width: 64
+
+  image_encoder:
+    Activation: "nn.ELU"
+    N: 32
+
+  image_decoder:
+    Activation: "nn.ELU"
+    N: 32
+
