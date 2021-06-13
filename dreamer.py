@@ -5,6 +5,7 @@ from utils import RandomPolicy
 from math import ceil
 from garage.sampler import LocalSampler
 from utils import get_config, segs_to_batch, log_episodes, log_reconstructions
+import torch
 from torch import optim
 from garage.torch import global_device
 from tqdm import tqdm
@@ -50,7 +51,9 @@ class Dreamer(RLAlgorithm):
         """
 
         logger.log('INITIALIZING')
-        self._initialize_dataset(trainer)
+        self._initialize_dataset(
+            trainer,
+            seed_episodes=get_config().training.seed_episodes)
 
         for i in trainer.step_epochs():
             logger.log('COLLECTING')
@@ -108,6 +111,9 @@ class Dreamer(RLAlgorithm):
         out = self.world_model(obs, actions)
         loss, loss_info = self.world_model.loss(out, obs, rewards, discounts)
         loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            self.world_model.parameters(), get_config().training.grad_clip)
         self.optimizer.step()
 
         with tabular.prefix('world_model'):

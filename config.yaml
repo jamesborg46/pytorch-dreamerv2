@@ -10,6 +10,8 @@ defaults:
     num_segs_per_batch: 50
     seg_length: 50
     num_training_steps: 50
+    seed_episodes: 20
+    grad_clip: 20
 
   logging:
     log_vid_freq: 2
@@ -17,7 +19,7 @@ defaults:
   rssm:
     stoch_state_classes: 32
     stoch_state_size: 32
-    det_state_size: 400
+    det_state_size: 600
     alpha: 0.8
     beta: 0.1
     act: "nn.functional.elu"
@@ -37,11 +39,11 @@ defaults:
 
   image_encoder:
     Activation: "nn.ELU"
-    N: 32
+    N: 48
 
   image_decoder:
     Activation: "nn.ELU"
-    N: 32
+    N: 48
 
 debug:
   training:
@@ -52,6 +54,7 @@ debug:
     num_segs_per_batch: 5
     seg_length: 20 
     num_training_steps: 3 
+    seed_episodes: 2
 
   rssm:
     stoch_state_classes: 16
