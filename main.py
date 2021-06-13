@@ -8,8 +8,7 @@ import torch.nn.functional as F  # noqa: F401
 from garage import wrap_experiment
 from garage.envs import GymEnv
 from garage.envs.wrappers import (
-    ClipReward, EpisodicLife,  FireReset, Grayscale,  MaxAndSkip, Noop,
-    Resize, StackFrames)
+    ClipReward, EpisodicLife,  FireReset, Grayscale,  Noop, StackFrames)
 from garage.experiment.deterministic import set_seed
 from garage.torch import set_gpu_mode
 from garage.sampler import LocalSampler, RaySampler, DefaultWorker
@@ -21,7 +20,7 @@ import gym.envs.atari
 from replay_buffer import ReplayBuffer # noqa: F401
 from dreamer import Dreamer
 from models import WorldModel
-from wrappers import Renderer
+from wrappers import Renderer, Resize, MaxAndSkip
 from utils import set_config, get_config, RandomPolicy
 
 import time
@@ -41,7 +40,7 @@ def dreamer(ctxt):
 
     env = gym.envs.atari.AtariEnv(
         CONFIG.env.name, obs_type='image', frameskip=1,
-        repeat_action_probability=0.25, full_action_space=False)
+        repeat_action_probability=0.25, full_action_space=True)
     env = Noop(env, noop_max=30)
     env = MaxAndSkip(env, skip=4)
     # env = EpisodicLife(env)

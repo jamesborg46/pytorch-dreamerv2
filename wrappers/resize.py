@@ -68,7 +68,7 @@ class Resize(gym.Wrapper):
             warnings.simplefilter('ignore')
             obs = cv2.resize(
                 obs, (self._width, self._height),
-                interpoliation=cv2.INTER_AREA)  # now it's float
+                interpolation=cv2.INTER_AREA)  # now it's float
         return obs
 
     def reset(self):
