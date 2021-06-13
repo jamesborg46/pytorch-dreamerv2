@@ -11,6 +11,7 @@ from garage.torch import global_device
 from tqdm import tqdm
 import os.path as osp
 
+scaler = torch.cuda.amp.GradScaler(enabled=True)
 
 class Dreamer(RLAlgorithm):
 
@@ -108,13 +109,21 @@ class Dreamer(RLAlgorithm):
     def train_world_model_once(self, obs, actions, rewards, discounts):
 
         self.optimizer.zero_grad()
-        out = self.world_model(obs, actions)
-        loss, loss_info = self.world_model.loss(out, obs, rewards, discounts)
-        loss.backward()
+
+        with torch.cuda.amp.autocast():
+            out = self.world_model(obs, actions)
+            loss, loss_info = self.world_model.loss(out, obs, rewards, discounts)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(self.optimizer)
+
+        # loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
             self.world_model.parameters(), get_config().training.grad_clip)
-        self.optimizer.step()
+        scaler.step(self.optimizer)
+        scaler.update()
+        # self.optimizer.step()
 
         with tabular.prefix('world_model'):
             for k, v in loss_info.items():
