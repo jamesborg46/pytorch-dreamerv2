@@ -11,7 +11,7 @@ from garage.envs.wrappers import (
     ClipReward, EpisodicLife,  FireReset, Grayscale,  Noop, StackFrames)
 from garage.experiment.deterministic import set_seed
 from garage.torch import set_gpu_mode
-from garage.sampler import LocalSampler, RaySampler, DefaultWorker
+from garage.sampler import LocalSampler, RaySampler, DefaultWorker, VecWorker
 from garage.trainer import Trainer
 from garage.torch.optimizers import OptimizerWrapper  # noqa: F401
 
@@ -70,12 +70,12 @@ def dreamer(ctxt):
     sampler = Sampler(agents=agent,  # noqa: F841
                       envs=env,
                       max_episode_length=max_episode_length,
-                      n_workers=16)
+                      n_workers=8)
 
     log_sampler = Sampler(agents=agent,  # noqa: F841
                       envs=env,
                       max_episode_length=max_episode_length,
-                      n_workers=16)
+                      n_workers=4)
 
     set_gpu_mode(True)
 

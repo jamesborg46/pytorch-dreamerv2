@@ -187,7 +187,13 @@ class WorldModel(torch.nn.Module):
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
         recon_loss = -out['image_recon_dist'].log_prob(observation_batch).mean()
-        loss = reward_loss + discount_loss + recon_loss + self.config.rssm.beta * kl_loss
+        loss = (
+            self.config.loss_scales.reward * reward_loss +
+            self.config.loss_scales.discount * discount_loss +
+            self.config.loss_scales.recon * recon_loss +
+            self.config.loss_scales.kl * kl_loss
+        )
+
         loss_info = {
             'kl_loss': kl_loss,
             'reward_loss': reward_loss,

@@ -1,36 +1,52 @@
 defaults:
   env:
-    name: "enduro"
+    name: "breakout"
 
   training:
     seed: 42
-    lr: 0.0002
     n_epochs: 10000
     sampler: "ray"
     num_segs_per_batch: 50
     seg_length: 50
-    num_training_steps: 100 
-    seed_episodes: 5
+    num_training_steps: 200 
+    seed_episodes: 2
     grad_clip: 20
+
+  loss_scales:
+    reward: 1
+    discount: 5
+    recon: 1
+    kl: 0.1
 
   logging:
     log_vid_freq: 20
+
+  world:
+    lr: 0.0002
+    eps: 1e-5
+    wd: 1e-6
+    pretrain: 5 
 
   rssm:
     stoch_state_classes: 32
     stoch_state_size: 32
     det_state_size: 600
     alpha: 0.8
-    beta: 0.1
     act: "nn.functional.elu"
 
   actor:
     grad: "reinforce"
     ent_scale: 1e-3
+    lr: 4e-5
+    eps: 1e-5
+    wd: 1e-6
 
   critic:
     imag_horizon: 15
     lam: 0.95
+    lr: 1e-4
+    eps: 1e-5
+    wd: 1e-6
 
   reward_head:
     units: [400, 400, 400, 400]
