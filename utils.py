@@ -99,12 +99,12 @@ def log_episodes(itr,
 
     sampler._update_workers(
         env_update=env_updates,
-        agent_update=policy
+        agent_update={k: v.cpu() for k, v in policy.state_dict().items()}
     )
 
     episodes = sampler.obtain_exact_episodes(
         n_eps_per_worker=n_eps_per_worker,
-        agent_update=policy
+        agent_update={k: v.cpu() for k, v in policy.state_dict().items()}
     )
 
     if enable_render:
@@ -112,7 +112,7 @@ def log_episodes(itr,
 
         updates = sampler._update_workers(
             env_update=env_updates,
-            agent_update=policy
+            agent_update={k: v.cpu() for k, v in policy.state_dict().items()}
         )
 
         while updates:
@@ -186,8 +186,7 @@ def segs_to_batch(segs, env_spec):
         discounts.append(1 - seg.terminals)
 
     obs = torch.tensor(np.array(obs), device=device, dtype=torch.float)
-    if _CONFIG.image.color_channels == 1:
-        obs = obs.unsqueeze(2)
+    obs = obs.unsqueeze(2)
     obs = obs / 255 - 0.5
 
     actions = torch.tensor(

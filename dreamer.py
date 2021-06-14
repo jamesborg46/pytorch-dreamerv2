@@ -3,13 +3,14 @@ from garage import EnvSpec
 from garage.np.algos import RLAlgorithm
 from utils import RandomPolicy
 from math import ceil
-from garage.sampler import LocalSampler
+from garage.sampler import RaySampler, LocalSampler
 from utils import get_config, segs_to_batch, log_episodes, log_reconstructions
 import torch
 from torch import optim
 from garage.torch import global_device
 from tqdm import tqdm
 import os.path as osp
+import time
 
 scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -35,8 +36,11 @@ class Dreamer(RLAlgorithm):
         self.log_vid_freq = get_config().logging.log_vid_freq
         self._num_segs_per_batch = get_config().training.num_segs_per_batch
         self._num_training_steps = get_config().training.num_training_steps
-        self.optimizer = optim.Adam(self.world_model.parameters(),
-                                    lr=get_config().training.lr)
+        self.world_optimizer = optim.Adam(self.world_model.parameters(),
+                                          lr=get_config().training.lr)
+
+        # self.critic_optimizer = optim.Adam()
+        # self.actor_optimizer = optim.Adam()
 
     def train(self, trainer):
         """Obtain samplers and start actual training for each epoch.
@@ -58,12 +62,14 @@ class Dreamer(RLAlgorithm):
 
         for i in trainer.step_epochs():
             logger.log('COLLECTING')
+            start = time.time()
             eps = self._sampler.obtain_exact_episodes(
                 n_eps_per_worker=1,
-                agent_update=self.agent,
+                agent_update={k: v.cpu() for k, v in self.agent.state_dict().items()}
             )
             self.buffer.collect(eps)
             self.buffer.log_stats(trainer.step_itr)
+            print(time.time() - start)
 
             logger.log('TRAINING')
             for j in tqdm(range(self._num_training_steps)):
@@ -108,22 +114,22 @@ class Dreamer(RLAlgorithm):
 
     def train_world_model_once(self, obs, actions, rewards, discounts):
 
-        self.optimizer.zero_grad()
+        self.world_optimizer.zero_grad()
 
         with torch.cuda.amp.autocast():
             out = self.world_model(obs, actions)
             loss, loss_info = self.world_model.loss(out, obs, rewards, discounts)
 
         scaler.scale(loss).backward()
-        scaler.unscale_(self.optimizer)
+        scaler.unscale_(self.world_optimizer)
 
         # loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
             self.world_model.parameters(), get_config().training.grad_clip)
-        scaler.step(self.optimizer)
+        scaler.step(self.world_optimizer)
         scaler.update()
-        # self.optimizer.step()
+        # self.world_optimizer.step()
 
         with tabular.prefix('world_model'):
             for k, v in loss_info.items():

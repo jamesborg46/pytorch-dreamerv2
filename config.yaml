@@ -6,15 +6,15 @@ defaults:
     seed: 42
     lr: 0.0002
     n_epochs: 10000
-    sampler: "local"
+    sampler: "ray"
     num_segs_per_batch: 50
     seg_length: 50
-    num_training_steps: 50
-    seed_episodes: 20
+    num_training_steps: 100 
+    seed_episodes: 5
     grad_clip: 20
 
   logging:
-    log_vid_freq: 2
+    log_vid_freq: 20
 
   rssm:
     stoch_state_classes: 32
@@ -23,6 +23,14 @@ defaults:
     alpha: 0.8
     beta: 0.1
     act: "nn.functional.elu"
+
+  actor:
+    grad: "reinforce"
+    ent_scale: 1e-3
+
+  critic:
+    imag_horizon: 15
+    lam: 0.95
 
   reward_head:
     units: [400, 400, 400, 400]
@@ -50,7 +58,7 @@ debug:
     seed: 42
     lr: 0.0002
     n_epochs: 100
-    sampler: "local"
+    sampler: "ray"
     num_segs_per_batch: 5
     seg_length: 20 
     num_training_steps: 3 
@@ -63,6 +71,9 @@ debug:
     alpha: 0.8
     beta: 0.1
     act: "nn.functional.elu"
+
+  critic:
+    imag_horizon: 5
 
   logging:
     log_vid_freq: 1

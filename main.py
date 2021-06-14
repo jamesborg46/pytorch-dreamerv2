@@ -19,7 +19,7 @@ import gym
 import gym.envs.atari
 from replay_buffer import ReplayBuffer # noqa: F401
 from dreamer import Dreamer
-from models import WorldModel
+from models import WorldModel, ActorCritic
 from wrappers import Renderer, Resize, MaxAndSkip
 from utils import set_config, get_config, RandomPolicy
 
@@ -59,23 +59,23 @@ def dreamer(ctxt):
     trainer = Trainer(ctxt)
 
     buf = ReplayBuffer(env.spec)
-    policy = RandomPolicy(env.spec)
-    world_model = WorldModel(env.spec)
+    world_model = WorldModel(env.spec, config=CONFIG)
+    agent = ActorCritic(env.spec, world_model, config=CONFIG)
 
     if CONFIG.training.sampler == "ray":
         Sampler = RaySampler
     elif CONFIG.training.sampler == "local":
         Sampler = LocalSampler
 
-    sampler = Sampler(agents=policy,  # noqa: F841
+    sampler = Sampler(agents=agent,  # noqa: F841
                       envs=env,
                       max_episode_length=max_episode_length,
-                      n_workers=4)
+                      n_workers=16)
 
-    log_sampler = Sampler(agents=policy,  # noqa: F841
+    log_sampler = Sampler(agents=agent,  # noqa: F841
                       envs=env,
                       max_episode_length=max_episode_length,
-                      n_workers=4)
+                      n_workers=16)
 
     set_gpu_mode(True)
 
@@ -84,7 +84,7 @@ def dreamer(ctxt):
         sampler=sampler,
         log_sampler=log_sampler,
         world_model=world_model,
-        agent=policy,
+        agent=agent,
         buf=buf,
     )
 

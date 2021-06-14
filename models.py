@@ -7,6 +7,7 @@ from torch.distributions.utils import logits_to_probs
 from torch._six import inf
 import torch.nn.functional as F
 from garage.torch import global_device
+from garage.torch.policies import Policy
 from utils import get_config
 from dowel import logger
 
@@ -23,10 +24,10 @@ def categorical_kl(logits_p, logits_q):
     return t.sum(dim=[-1, -2])
 
 
-def kl_loss(posterior, prior):
+def kl_loss(posterior, prior, config):
     lhs = categorical_kl(posterior.logits.detach(), prior.logits)
     rhs = categorical_kl(posterior.logits, prior.logits.detach())
-    kl_loss = get_config().rssm.alpha * lhs + (1 - get_config().rssm.alpha) * rhs
+    kl_loss = config.rssm.alpha * lhs + (1 - config.rssm.alpha) * rhs
 
     if not torch.isclose(lhs, rhs).all():
         max_dif = torch.max(torch.abs(lhs - rhs)).cpu().item()
@@ -43,39 +44,49 @@ def kl_loss(posterior, prior):
     return kl_loss
 
 
+class StraightThroughOneHotDist(torch.distributions.OneHotCategorical):
+
+    def rsample(self, sample_shape=torch.Size()):
+        sample = self.sample(sample_shape).type(torch.float)
+        sample += self.probs - self.probs.detach()  # Straight through gradients trick
+        return sample
+
+
 class WorldModel(torch.nn.Module):
 
-    def __init__(self, env_spec):
+    def __init__(self, env_spec, config):
         super().__init__()
         self.env_spec = env_spec
+        self.config = config
 
-        self.rssm = RSSM(env_spec)
-        self.image_encoder = ImageEncoder()
-        self.image_decoder = ImageDecoder()
+        self.rssm = RSSM(env_spec, config=self.config)
+        self.image_encoder = ImageEncoder(config=self.config)
+        self.image_decoder = ImageDecoder(config=self.config)
 
-        self.feat_size = (
-            get_config().rssm.stoch_state_classes * get_config().rssm.stoch_state_size
-            + get_config().rssm.det_state_size
+        self.latent_state_size = (
+            self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
+            + self.config.rssm.det_state_size
         )
 
         self.reward_predictor = MLP(
-            input_shape=self.feat_size,
-            units=get_config().reward_head.units,
+            input_shape=self.latent_state_size,
+            units=self.config.reward_head.units,
             dist='mse')
 
         self.discount_predictor = MLP(
-            input_shape=self.feat_size,
-            units=get_config().discount_head.units,
+            input_shape=self.latent_state_size,
+            units=self.config.discount_head.units,
             dist='bernoulli')
 
     def reconstruct(self, observations, actions):
         steps, channels, height, width = observations.shape
         embedded_observations = self.image_encoder(
             observations)
-        out = self.rssm.observe(embedded_observations.unsqueeze(0),
+        out = self.observe(embedded_observations.unsqueeze(0),
                                 actions.unsqueeze(0))
-        feats = out['feats'].reshape(steps, self.feat_size)
-        image_recon = self.image_decoder(feats).reshape(
+        latent_states = out['latent_states'].reshape(steps,
+                                                     self.latent_state_size)
+        image_recon = self.image_decoder(latent_states).reshape(
             steps, channels, height, width)
         return image_recon
 
@@ -85,11 +96,12 @@ class WorldModel(torch.nn.Module):
             segs*steps, channels, height, width)
         embedded_observations = self.image_encoder(
             flattened_observations).reshape(segs, steps, -1)
-        out = self.rssm.observe(embedded_observations, actions)
-        out['reward_dist'] = self.reward_predictor(out['feats'])
-        out['discount_dist'] = self.discount_predictor(out['feats'])
-        flattened_feats = out['feats'].reshape(segs*steps, self.feat_size)
-        mean = self.image_decoder(flattened_feats).reshape(
+        out = self.observe(embedded_observations, actions)
+        out['reward_dist'] = self.reward_predictor(out['latent_states'])
+        out['discount_dist'] = self.discount_predictor(out['latent_states'])
+        flattened_latent_states = (
+            out['latent_states'].reshape(segs*steps, self.latent_state_size))
+        mean = self.image_decoder(flattened_latent_states).reshape(
             segs, steps, channels, height, width)
         norm = distributions.Normal(loc=mean, scale=1)
         image_recon_dist = distributions.Independent(norm, 3)
@@ -97,12 +109,85 @@ class WorldModel(torch.nn.Module):
         out['image_recon_dist'] = image_recon_dist
         return out
 
+    def imagine(self, policy, initial_stoch, initial_deter, horizon):
+        stoch, deter = initial_stoch, initial_deter
+        latent_state = self.get_latent_state(stoch, deter)
+
+        actions = []
+        latents = []
+
+        for _ in range(horizon):
+            action = policy(latent_state.detach()).rsample()
+            prior, deter = self.rssm.imagine_step(stoch, deter, action)
+            stoch = prior.rsample()
+            latent_state = self.get_latent_state(stoch, deter)
+            actions.append(action)
+            latents.append(latent_state)
+
+        actions = torch.stack(actions)
+        latents = torch.stack(latents)
+        rewards = self.reward_predictor(latents).mean
+        discounts = self.discount_predictor(latents).mean
+
+        return actions, latents, rewards, discounts
+
+    def observe(self, embedded_observations, actions):
+        segs, steps, embedding_size = embedded_observations.shape
+        assert segs == actions.shape[0]
+        assert steps == actions.shape[1]
+
+        swap = lambda t: torch.swapaxes(t, 0, 1)
+
+        # Change from SEGS x STEPS x N -> STEPS x SEGS x N
+        # This facilitates 
+        embedded_observations = swap(embedded_observations)
+        actions = swap(actions)
+
+        initial = self.rssm.initial_state(batch_size=segs)
+        stoch, deter = initial['stoch'], initial['deter']
+
+        posterior_samples = []
+        prior_samples = []
+        deters = []
+        # latent_states = []
+        kl_losses = []
+
+        for embed, action in zip(embedded_observations, actions):
+            prior, deter = self.rssm.imagine_step(stoch, deter, action)
+            posterior = self.rssm.observe_step(deter, embed)
+            stoch = posterior.rsample()
+
+            posterior_samples.append(stoch)
+            prior_samples.append(prior.rsample())
+            deters.append(deter)
+            # latent_states.append(
+            #     torch.cat([stoch.flatten(start_dim=1), deter], dim=-1))
+            kl_losses.append(kl_loss(posterior, prior, self.config))
+
+        out = {
+            'posterior_samples': swap(torch.stack(posterior_samples)),
+            'prior_samples': swap(torch.stack(prior_samples)),
+            'deters': swap(torch.stack(deters)),
+            'kl_losses': swap(torch.stack(kl_losses))
+        }
+        out['latent_states'] = self.get_latent_state(
+            out['posterior_samples'], out['deters'])
+
+        return out
+
+    def get_latent_state(self, stoch, deter):
+        latent_state = torch.cat(
+            [stoch.flatten(start_dim=-2), deter],
+            dim=-1
+        )
+        return latent_state
+
     def loss(self, out, observation_batch, reward_batch, discount_batch):
         kl_loss = out['kl_losses'].mean()
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
         recon_loss = -out['image_recon_dist'].log_prob(observation_batch).mean()
-        loss = reward_loss + discount_loss + recon_loss + get_config().rssm.beta * kl_loss
+        loss = reward_loss + discount_loss + recon_loss + self.config.rssm.beta * kl_loss
         loss_info = {
             'kl_loss': kl_loss,
             'reward_loss': reward_loss,
@@ -113,23 +198,168 @@ class WorldModel(torch.nn.Module):
         return loss, loss_info
 
 
-class Actor(object):
-    pass
+class ActorCritic(Policy):
+
+    def __init__(self,
+                 env_spec,
+                 world_model,
+                 config,
+                 n_envs=1):
+        super().__init__(env_spec=env_spec, name='ActorCritic')
+        self.world_model = world_model
+        self.config = config
+
+        self.latent_state_size = (
+            self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
+            + self.config.rssm.det_state_size
+        )
+
+        self.actor = MLP(
+            input_shape=self.latent_state_size,
+            out_shape=env_spec.action_space.n,
+            units=self.config.actor.units,
+            dist='onehot')
+
+        self.critic = MLP(
+            input_shape=self.latent_state_size,
+            units=self.config.actor.units,
+            dist='mse'
+        )
+
+        self.target_critic = MLP(
+            input_shape=self.latent_state_size,
+            units=self.config.actor.units,
+            dist='mse'
+        )
+
+        self.initial_state = self.world_model.rssm.initial_state(n_envs)
+        self.deter = self.initial_state['deter']
+
+    def get_action(self, observation):
+        with torch.no_grad():
+            obs = torch.tensor(
+                observation, device=global_device(), dtype=torch.float)
+
+            obs = obs.unsqueeze(0)  # Adding batch dimension
+
+            if self.config.image.color_channels == 1:
+                obs = obs.unsqueeze(1)  # Adding color channel
+
+            embedded_obs = self.world_model.image_encoder(obs)
+
+            posterior = self.world_model.rssm.observe_step(
+                deter=self.deter, embed=embedded_obs)
+
+            stoch = posterior.rsample()
+
+            latent_state = self.world_model.get_latent_state(
+                stoch, self.deter)
+
+            action = self.actor(latent_state).rsample().unsqueeze(0)
+
+            prior, deter = self.world_model.rssm.imagine_step(
+                stoch, self.deter, action)
+
+            self.deter = deter
+
+        return torch.argmax(action[0]).item(), {}
+
+    def get_actions(self, observations):
+        pass
+
+    def reset(self, do_resets=None):
+        self.deter = self.initial_state['deter']
+
+    def forward(self, initial_stoch, initial_deter):
+        actions, latents, rewards, discounts = self.world_model.imagine(
+            policy=self.actor,
+            initial_stoch=initial_stoch,
+            initial_deter=initial_deter,
+            horizon=self.config.critic.imag_horizon
+            )
+
+        weights = torch.cumprod(
+            torch.cat([torch.ones_like(discounts[:1]), discounts[1:]]),
+            dim=0)
+
+        critic_dist = self.critic(latents)
+        values = critic_dist.mean
+        values_t = self.target_critic(latents).mean
+        targets = self.lambda_return(
+            values_t, rewards, discounts, lam=self.config.critic.lam)
+
+        out = {
+            'actions': actions,
+            'latents': latents,
+            'rewards': rewards,
+            'discounts': discounts,
+            'critic_dist': critic_dist,
+            'values': values,
+            'values_t': values_t,
+            'targets': targets,
+            'weights': weights,
+        }
+
+        return out
+
+    def lambda_return(self, values_t, rewards, discounts, lam):
+        horizon, rollouts = values_t.shape
+        assert rewards.shape == (horizon, rollouts)
+        assert discounts.shape == (horizon, rollouts)
+
+        H = horizon
+        prev_return = values_t[H-1]
+        returns_reversed = [prev_return]
+
+        for i in range(1, horizon):
+            lambda_return = (
+                rewards[H-i-1] +
+                discounts[H-i] * (
+                    (1-lam)*values_t[H-i] + lam * prev_return
+                )
+            )
+            returns_reversed.append(lambda_return)
+            prev_return = lambda_return
+
+        lambda_returns = torch.flip(torch.stack(returns_reversed), dims=[0])
+        return lambda_returns
+
+    def actor_loss(self, latents, values, action, target, weights):
+        policy = self.actor(latents.detach())
+
+        if self.config.actor.grad == 'reinforce':
+            baseline = values
+            advantage = (target - baseline).detach()
+            objective = policy.log_prob(action) * advantage
+        ent_scale = self.config.actor.ent_scale
+        objective += ent_scale * policy.entropy()
+        actor_loss = -(objective * weights)[:-1].mean()
+        return actor_loss
+
+    def critic_loss(self, latents, targets, weights):
+        dist = self.critic(latents)
+        critic_loss = -(dist.log_prob(targets) * weights)[:-1].mean()
+        return critic_loss
+
+    def update_target_critic(self):
+        self.target_critic.load_state_dict(self.critic.state_dict())
 
 
 class RSSM(torch.nn.Module):
 
     def __init__(self,
-                 env_spec,):
+                 env_spec,
+                 config,):
         super().__init__()
         self._env_spec = env_spec
+        self.config = config
         self.action_size = env_spec.action_space.n
 
-        self.embed_size = get_config().image_encoder.N * 32
-        self.stoch_state_classes = get_config().rssm.stoch_state_classes
-        self.stoch_state_size = get_config().rssm.stoch_state_size
-        self.det_state_size = get_config().rssm.det_state_size
-        self.act = eval(get_config().rssm.act)
+        self.embed_size = self.config.image_encoder.N * 32
+        self.stoch_state_classes = self.config.rssm.stoch_state_classes
+        self.stoch_state_size = self.config.rssm.stoch_state_size
+        self.det_state_size = self.config.rssm.det_state_size
+        self.act = eval(self.config.rssm.act)
 
         self.register_parameter(
             name='cell_initial_state',
@@ -178,82 +408,38 @@ class RSSM(torch.nn.Module):
         deter = self.cell(x, prev_deter)
         return deter
 
-    def get_stoch(self, x):
-        logits = x.reshape(
-            *x.shape[:-1],
-            self.stoch_state_size,
-            self.stoch_state_classes)
-        dist = distributions.Categorical(logits=logits)
-        sample = F.one_hot(dist.sample(), num_classes=self.stoch_state_classes).type(torch.float)
-        sample += dist.probs - dist.probs.detach()  # Straight through gradients trick
-        return sample, dist
-
     def imagine_step(self, prev_stoch, prev_deter, prev_action):
         deter = self.step(prev_stoch, prev_deter, prev_action)
         x = self.act(self.imagine_out_1(deter))
         x = self.imagine_out_2(x)
-        sample, dist = self.get_stoch(x)
-        prior = {'sample': sample, 'dist': dist}
+        logits = x.reshape(
+            *x.shape[:-1],
+            self.stoch_state_size,
+            self.stoch_state_classes
+        )
+        prior = StraightThroughOneHotDist(logits=logits)
         return prior, deter
 
-    def observe_step(self, prev_stoch, prev_deter, prev_action, embed):
-        prior, deter = self.imagine_step(prev_stoch, prev_deter, prev_action)
+    def observe_step(self, deter, embed):
         x = torch.cat([deter, embed], dim=-1)
         x = self.act(self.observe_out_1(x))
         x = self.observe_out_2(x)
-        sample, dist = self.get_stoch(x)
-        posterior = {'sample': sample, 'dist': dist}
-        return posterior, prior, deter
-
-    def imagine(self):
-        pass
-
-    def observe(self, embedded_observations, actions):
-        segs, steps, embedding_size = embedded_observations.shape
-        assert segs == actions.shape[0]
-        assert steps == actions.shape[1]
-
-        # Change from SEGS x STEPS x N -> STEPS x SEGS x N
-        # This facilitates 
-        embedded_observations = torch.swapaxes(embedded_observations, 0, 1)
-        actions = torch.swapaxes(actions, 0, 1)
-
-        initial = self.initial_state(batch_size=segs)
-        stoch, deter = initial['stoch'], initial['deter']
-
-        posteriors = []
-        priors = []
-        deters = []
-        feats = []
-        kl_losses = []
-
-        for embed, action in zip(embedded_observations, actions):
-            posterior, prior, deter = self.observe_step(stoch, deter, action, embed)
-            stoch = posterior['sample']
-
-            posteriors.append(posterior)
-            priors.append(prior)
-            deters.append(deter)
-            feats.append(torch.cat([stoch.flatten(start_dim=1), deter], dim=-1))
-            kl_losses.append(kl_loss(posterior['dist'], prior['dist']))
-
-        out = {
-            'posteriors': posteriors,
-            'priors': priors,
-            'deters': torch.swapaxes(torch.stack(deters), 0, 1),
-            'feats': torch.swapaxes(torch.stack(feats), 0, 1),
-            'kl_losses': torch.swapaxes(torch.stack(kl_losses), 0, 1)
-        }
-
-        return out
+        logits = x.reshape(
+            *x.shape[:-1],
+            self.stoch_state_size,
+            self.stoch_state_classes
+        )
+        posterior = StraightThroughOneHotDist(logits=logits)
+        return posterior
 
 
 class ImageEncoder(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
 
-        Activation = eval(get_config().image_encoder.Activation)
-        self.N = N = get_config().image_encoder.N
+        Activation = eval(self.config.image_encoder.Activation)
+        self.N = N = self.config.image_encoder.N
 
         self.model = nn.Sequential(
             nn.Conv2d(1, N*1, 4, 2),
@@ -270,23 +456,25 @@ class ImageEncoder(torch.nn.Module):
         x = self.model(img)
         return torch.flatten(x, start_dim=1)
 
+
 class ImageDecoder(torch.nn.Module):
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
 
-        Activation = eval(get_config().image_decoder.Activation)
-        self.N = N = get_config().image_decoder.N
+        Activation = eval(self.config.image_decoder.Activation)
+        self.N = N = self.config.image_decoder.N
         self.shape = [
-            get_config().image.height,
-            get_config().image.width,
-            get_config().image.color_channels
+            self.config.image.height,
+            self.config.image.width,
+            self.config.image.color_channels
         ]
-        feat_shape = (
-            get_config().rssm.stoch_state_classes * get_config().rssm.stoch_state_size
-            + get_config().rssm.det_state_size)
+        latent_state_shape = (
+            self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
+            + self.config.rssm.det_state_size)
 
-        self.dense = nn.Linear(feat_shape, N*32)
+        self.dense = nn.Linear(latent_state_shape, N*32)
         self.deconvolve = nn.Sequential(
             nn.ConvTranspose2d(N*32, N*4, 5, 2),
             Activation(),
@@ -307,7 +495,8 @@ class ImageDecoder(torch.nn.Module):
 
 class MLP(torch.nn.Module):
 
-    def __init__(self, input_shape, units, dist='mse', Activation=torch.nn.ELU):
+    def __init__(self, input_shape, units, out_shape=1,
+                 dist='mse', Activation=torch.nn.ELU):
         super().__init__()
         self.dist = dist
 
@@ -316,7 +505,7 @@ class MLP(torch.nn.Module):
             self.net.add_module(f"linear_{i}", nn.Linear(input_shape, unit))
             self.net.add_module(f"activation_{i}", Activation())
             input_shape = unit
-        self.net.add_module("out_layer", nn.Linear(input_shape, 1))
+        self.net.add_module("out_layer", nn.Linear(input_shape, out_shape))
 
     def forward(self, features):
         logits = self.net(features).squeeze()
@@ -324,4 +513,6 @@ class MLP(torch.nn.Module):
             return torch.distributions.Normal(loc=logits, scale=1)
         elif self.dist == 'bernoulli':
             return torch.distributions.Bernoulli(logits=logits)
+        elif self.dist == 'onehot':
+            return StraightThroughOneHotDist(logits=logits)
 
