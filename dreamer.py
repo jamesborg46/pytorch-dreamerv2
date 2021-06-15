@@ -100,21 +100,13 @@ class Dreamer(RLAlgorithm):
                     obs, actions, rewards, discounts
                 )
 
-                if i >= get_config().world.pretrain():
+                if i >= get_config().world.pretrain:
                     self.train_actor_critic_once(wm_out)
 
                 logger.log(tabular)
                 logger.dump_all(trainer.step_itr)
                 tabular.clear()
                 trainer.step_itr += 1
-
-                # Each should be SEGS x STEPS x ... in shape
-
-                # Model learning
-                # Update rssm_model params
-                #
-                # Behaviour learning
-                #
 
             self.agent.update_target_critic()
 
@@ -178,6 +170,18 @@ class Dreamer(RLAlgorithm):
         with tabular.prefix('actor_critic_'):
             tabular.record('actor_loss', actor_loss.cpu().item())
             tabular.record('critic_loss', critic_loss.cpu().item())
+            tabular.record_misc_stat(
+                'pred_discount',
+                act_out['discounts'].cpu().detach().flatten().tolist())
+            tabular.record_misc_stat(
+                'pred_reward',
+                act_out['rewards'].cpu().detach().flatten().tolist())
+            tabular.record_misc_stat(
+                'pred_values',
+                act_out['values'].cpu().detach().flatten().tolist())
+            tabular.record_misc_stat(
+                'pred_target_values',
+                act_out['values_t'].cpu().detach().flatten().tolist())
 
     def train_world_model_once(self, obs, actions, rewards, discounts):
 
@@ -203,7 +207,7 @@ class Dreamer(RLAlgorithm):
 
     def _initialize_dataset(self, trainer, seed_episodes=5):
         random_policy = RandomPolicy(self.env_spec)
-        random_sampler = LocalSampler(
+        random_sampler = RaySampler(
             agents=random_policy,
             envs=trainer._env,
             max_episode_length=self.env_spec.max_episode_length,

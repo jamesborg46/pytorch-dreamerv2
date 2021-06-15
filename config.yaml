@@ -1,6 +1,6 @@
 defaults:
   env:
-    name: "breakout"
+    name: "enduro"
 
   training:
     seed: 42
@@ -10,7 +10,7 @@ defaults:
     seg_length: 50
     num_training_steps: 200 
     seed_episodes: 2
-    grad_clip: 20
+    grad_clip: 100
 
   loss_scales:
     reward: 1
@@ -37,6 +37,7 @@ defaults:
   actor:
     grad: "reinforce"
     ent_scale: 1e-3
+    units: [400, 400, 400, 400]
     lr: 4e-5
     eps: 1e-5
     wd: 1e-6
@@ -44,6 +45,7 @@ defaults:
   critic:
     imag_horizon: 15
     lam: 0.95
+    units: [400, 400, 400, 400]
     lr: 1e-4
     eps: 1e-5
     wd: 1e-6

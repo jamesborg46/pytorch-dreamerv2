@@ -187,6 +187,10 @@ class WorldModel(torch.nn.Module):
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
         recon_loss = -out['image_recon_dist'].log_prob(observation_batch).mean()
+
+        reward_mae = torch.abs(out['reward_dist'].mean - reward_batch).mean()
+        discount_mae = torch.abs(out['discount_dist'].mean - discount_batch).mean()
+
         loss = (
             self.config.loss_scales.reward * reward_loss +
             self.config.loss_scales.discount * discount_loss +
@@ -200,6 +204,8 @@ class WorldModel(torch.nn.Module):
             'discount_loss': discount_loss,
             'recon_loss': recon_loss,
             'total_loss': loss,
+            'reward_mae': reward_mae,
+            'discount_mae': discount_mae,
         }
         return loss, loss_info
 
@@ -247,6 +253,7 @@ class ActorCritic(Policy):
                 observation, device=global_device(), dtype=torch.float)
 
             obs = obs.unsqueeze(0)  # Adding batch dimension
+            obs = obs / 255 - 0.5
 
             if self.config.image.color_channels == 1:
                 obs = obs.unsqueeze(1)  # Adding color channel

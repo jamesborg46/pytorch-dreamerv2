@@ -26,13 +26,14 @@ from utils import set_config, get_config, RandomPolicy
 import time
 import os
 import argparse
+import socket
 import json
 import pickle
 import dowel
 from dowel import logger
 
 
-def dreamer(ctxt):
+def dreamer(ctxt, gpu_id=0):
 
     snapshot_dir = ctxt.snapshot_dir
 
@@ -77,7 +78,7 @@ def dreamer(ctxt):
                       max_episode_length=max_episode_length,
                       n_workers=4)
 
-    set_gpu_mode(True)
+    set_gpu_mode(True, gpu_id=gpu_id)
 
     algo = Dreamer(
         env.spec,
@@ -99,6 +100,7 @@ def dreamer(ctxt):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='preference reward learning')
     parser.add_argument('--name', type=str, required=True)
+    parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--config', type=str, default='defaults')
 
     torch.set_num_threads(4)
@@ -117,12 +119,15 @@ if __name__ == '__main__':
 
     log_dir = os.path.join(experiment_dir,
                            kwargs['name'] + time.ctime().replace(' ', '_'))
+    config = get_config()
+    hostname = socket.gethostname()
+    config['hostname'] = hostname
 
     logger.add_output(
         dowel.WandbOutput(
             project='dreamer',
             name=args['name'],
-            config=get_config(),
+            config=config,
         )
     )
 
@@ -133,4 +138,5 @@ if __name__ == '__main__':
         snapshot_mode='gap_overwrite',
         log_dir=log_dir,
     )
-    dreamer()
+
+    dreamer(gpu_id=kwargs['gpu'])
