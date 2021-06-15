@@ -256,13 +256,13 @@ class ActorCritic(Policy):
 
         self.critic = MLP(
             input_shape=self.latent_state_size,
-            units=self.config.actor.units,
+            units=self.config.critic.units,
             dist='mse'
         )
 
         self.target_critic = MLP(
             input_shape=self.latent_state_size,
-            units=self.config.actor.units,
+            units=self.config.critic.units,
             dist='mse'
         )
 
@@ -322,7 +322,7 @@ class ActorCritic(Policy):
 
         weights = torch.cumprod(
             torch.cat([torch.ones_like(discounts[:1]), discounts[1:]]),
-            dim=0)
+            dim=0).detach()
 
         critic_dist = self.critic(latents)
         values = critic_dist.mean
@@ -376,7 +376,7 @@ class ActorCritic(Policy):
         ent_scale = self.config.actor.ent_scale
         objective += ent_scale * policy.entropy()
         actor_loss = -(objective * weights)[:-1].mean()
-        return actor_loss
+        return actor_loss, policy.entropy()
 
     def critic_loss(self, latents, targets, weights):
         dist = self.critic(latents)

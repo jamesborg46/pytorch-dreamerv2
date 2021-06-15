@@ -152,7 +152,7 @@ class Dreamer(RLAlgorithm):
 
             act_out = self.agent(initial_stoch, initial_deter)
 
-            actor_loss = self.agent.actor_loss(
+            actor_loss, actor_entropy = self.agent.actor_loss(
                 act_out['latents'],
                 act_out['values'],
                 act_out['actions'],
@@ -178,6 +178,7 @@ class Dreamer(RLAlgorithm):
 
         with tabular.prefix('actor_critic_'):
             tabular.record('actor_loss', actor_loss.cpu().item())
+            tabular.record('actor_entropy', actor_entropy.mean().cpu().item())
             tabular.record('critic_loss', critic_loss.cpu().item())
             tabular.record_misc_stat(
                 'pred_discount',
