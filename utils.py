@@ -129,6 +129,67 @@ def log_episodes(itr,
     return episodes
 
 
+def log_imagined_rollouts(eps,
+                          env_spec,
+                          world_model,
+                          itr,
+                          path):
+
+    with torch.no_grad():
+        for i, ep in enumerate(eps.split()):
+            obs = (torch.tensor(eps.observations).type(torch.float)
+                   .unsqueeze(1)).to(global_device()) / 255 - 0.5
+            actions = (torch.tensor(env_spec.action_space.flatten_n(eps.actions))
+                       .type(torch.float)).to(global_device())
+            steps, channels, height, width = obs.shape
+            embedded_observations = world_model.image_encoder(obs[:5])
+
+            # Run first five steps with observations
+            out = world_model.observe(embedded_observations[:5].unsqueeze(0),
+                                      actions[:5].unsqueeze(0))
+            recon_latent_states = out['latent_states'].reshape(
+                5, world_model.latent_state_size)
+
+            initial_stoch = out['posterior_samples'][:1, -1]
+            inital_deter = out['deters'][:1, -1]
+            _, imagined_latent_states, _, _ = (
+                world_model.imagine(initial_stoch, inital_deter,
+                                    actions=actions[5:].unsqueeze(1))
+            )
+            imagined_latent_states = imagined_latent_states.reshape(
+                -1, world_model.latent_state_size)
+            latent_states = torch.cat(
+                [recon_latent_states, imagined_latent_states], dim=0)
+
+            image_recon = world_model.image_decoder(latent_states).reshape(
+                steps, channels, height, width).cpu().numpy()
+
+            image_recon = np.transpose(image_recon, (0, 2, 3, 1))
+            original_obs = np.transpose(obs.cpu().numpy(), (0, 2, 3, 1))
+
+            if original_obs.shape[-1] == 1:
+                image_recon = np.tile(image_recon, (1, 1, 1, 3))
+                original_obs = np.tile(original_obs, (1, 1, 1, 3))
+
+            original_obs = (original_obs + 0.5) * 255
+            image_recon = np.clip((image_recon + 0.5) * 255, 0, 255)
+            original_obs = original_obs.astype(np.uint8)
+            image_recon = image_recon.astype(np.uint8)
+
+            side_by_side = np.concatenate([original_obs, image_recon], axis=2)
+
+            fname = osp.join(path, f'imagined_{itr}_{i}.mp4')
+            export_video(
+                frames=side_by_side[:, ::-1],
+                fname=fname,
+                fps=10
+            )
+
+            wandb.log({
+                os.path.basename(fname): wandb.Video(fname),
+            }, step=itr)
+
+
 def log_reconstructions(eps,
                         env_spec,
                         world_model,
@@ -162,7 +223,7 @@ def log_reconstructions(eps,
             export_video(
                 frames=side_by_side[start:start+length, ::-1],
                 fname=fname,
-                fps=5
+                fps=10
             )
             start += length
 

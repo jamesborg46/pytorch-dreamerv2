@@ -4,7 +4,8 @@ from garage.np.algos import RLAlgorithm
 from utils import RandomPolicy
 from math import ceil
 from garage.sampler import RaySampler, LocalSampler
-from utils import get_config, segs_to_batch, log_episodes, log_reconstructions
+from utils import (get_config, segs_to_batch, log_episodes, log_reconstructions,
+                   log_imagined_rollouts)
 import torch
 from torch import optim
 from garage.torch import global_device
@@ -121,6 +122,14 @@ class Dreamer(RLAlgorithm):
                 )
 
                 log_reconstructions(
+                    eps,
+                    self.env_spec,
+                    self.world_model,
+                    trainer.step_itr,
+                    path=osp.join(trainer._snapshotter.snapshot_dir, 'videos')
+                )
+
+                log_imagined_rollouts(
                     eps,
                     self.env_spec,
                     self.world_model,

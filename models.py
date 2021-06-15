@@ -109,22 +109,42 @@ class WorldModel(torch.nn.Module):
         out['image_recon_dist'] = image_recon_dist
         return out
 
-    def imagine(self, policy, initial_stoch, initial_deter, horizon):
+    def imagine(self,
+                initial_stoch,
+                initial_deter,
+                policy=None,
+                horizon=None,
+                actions=None):
+        """
+        Rollout out imagination according to given policy OR given actions
+        """
+
+        assert (policy is None and horizon is None) or actions is None
+
         stoch, deter = initial_stoch, initial_deter
         latent_state = self.get_latent_state(stoch, deter)
 
-        actions = []
+        if policy is not None:
+            actions = []
+        elif actions is not None:
+            horizon = len(actions)
+
         latents = []
 
-        for _ in range(horizon):
-            action = policy(latent_state.detach()).rsample()
+        for i in range(horizon):
+            if policy is not None:
+                action = policy(latent_state.detach()).rsample()
+                actions.append(action)
+            else:
+                action = actions[i]
             prior, deter = self.rssm.imagine_step(stoch, deter, action)
             stoch = prior.rsample()
             latent_state = self.get_latent_state(stoch, deter)
-            actions.append(action)
             latents.append(latent_state)
 
-        actions = torch.stack(actions)
+        if policy is not None:
+            actions = torch.stack(actions)
+
         latents = torch.stack(latents)
         rewards = self.reward_predictor(latents).mean
         discounts = self.discount_predictor(latents).mean
@@ -216,10 +236,12 @@ class ActorCritic(Policy):
                  env_spec,
                  world_model,
                  config,
-                 n_envs=1):
+                 n_envs=1,
+                 random=False):
         super().__init__(env_spec=env_spec, name='ActorCritic')
         self.world_model = world_model
         self.config = config
+        self.random = random
 
         self.latent_state_size = (
             self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
@@ -248,6 +270,13 @@ class ActorCritic(Policy):
         self.deter = self.initial_state['deter']
 
     def get_action(self, observation):
+        if self.random:
+            action_space = self._env_spec.action_space
+            dist = torch.distributions.Categorical(
+                probs=torch.ones(action_space.n) / action_space.n
+            )
+            return dist.sample(), {}
+
         with torch.no_grad():
             obs = torch.tensor(
                 observation, device=global_device(), dtype=torch.float)
@@ -285,9 +314,9 @@ class ActorCritic(Policy):
 
     def forward(self, initial_stoch, initial_deter):
         actions, latents, rewards, discounts = self.world_model.imagine(
-            policy=self.actor,
             initial_stoch=initial_stoch,
             initial_deter=initial_deter,
+            policy=self.actor,
             horizon=self.config.critic.imag_horizon
             )
 

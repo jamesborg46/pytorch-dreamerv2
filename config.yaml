@@ -72,6 +72,9 @@ defaults:
     N: 48
 
 debug:
+  env:
+    name: "breakout"
+
   training:
     seed: 42
     lr: 0.0002
@@ -93,8 +96,11 @@ debug:
   critic:
     imag_horizon: 5
 
+  world:
+    pretrain: 1
+
   logging:
-    log_vid_freq: 1
+    log_vid_freq: 2
 
   reward_head:
     units: [100, 100]
