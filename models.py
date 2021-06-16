@@ -132,6 +132,7 @@ class WorldModel(torch.nn.Module):
         latents = []
 
         for i in range(horizon):
+            latents.append(latent_state)
             if policy is not None:
                 action = policy(latent_state.detach()).rsample()
                 actions.append(action)
@@ -140,7 +141,6 @@ class WorldModel(torch.nn.Module):
             prior, deter = self.rssm.imagine_step(stoch, deter, action)
             stoch = prior.rsample()
             latent_state = self.get_latent_state(stoch, deter)
-            latents.append(latent_state)
 
         if policy is not None:
             actions = torch.stack(actions)
@@ -356,7 +356,7 @@ class ActorCritic(Policy):
         for i in range(1, horizon):
             lambda_return = (
                 rewards[H-i-1] +
-                discounts[H-i] * (
+                discounts[H-i-1] * (
                     (1-lam)*values_t[H-i] + lam * prev_return
                 )
             )
@@ -373,6 +373,8 @@ class ActorCritic(Policy):
             baseline = values
             advantage = (target - baseline).detach()
             objective = policy.log_prob(action) * advantage
+        elif self.config.actor.grad == 'dynamics':
+            objective = target
         ent_scale = self.config.actor.ent_scale
         objective += ent_scale * policy.entropy()
         actor_loss = -(objective * weights)[:-1].mean()
