@@ -10,6 +10,7 @@ from garage.torch import global_device
 from garage.torch.policies import Policy
 from utils import get_config
 from dowel import logger
+import gym
 
 # def categorical_kl(probs_a, probs_b):
 #     return torch.sum(probs_a * torch.log(probs_a / probs_b), dim=[-1, -2])
@@ -397,7 +398,11 @@ class RSSM(torch.nn.Module):
         super().__init__()
         self._env_spec = env_spec
         self.config = config
-        self.action_size = env_spec.action_space.n
+
+        if isinstance(env_spec.action_space, gym.spaces.Dict):
+            self.action_size = env_spec.action_space.flattened.shape[0]
+        else:
+            self.action_size = env_spec.action_space.n
 
         self.embed_size = self.config.image_encoder.N * 32
         self.stoch_state_classes = self.config.rssm.stoch_state_classes
@@ -484,9 +489,10 @@ class ImageEncoder(torch.nn.Module):
 
         Activation = eval(self.config.image_encoder.Activation)
         self.N = N = self.config.image_encoder.N
+        input_channels = self.config.image.color_channels
 
         self.model = nn.Sequential(
-            nn.Conv2d(1, N*1, 4, 2),
+            nn.Conv2d(input_channels, N*1, 4, 2),
             Activation(),
             nn.Conv2d(N*1, N*2, 4, 2),
             Activation(),

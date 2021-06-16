@@ -232,6 +232,28 @@ def log_reconstructions(eps,
             }, step=itr)
 
 
+def minerl_segs_to_batch(segs, env_spec):
+
+    device = global_device()
+    states, actions, rewards, next_states, dones = segs
+
+    obs = torch.tensor(
+        np.transpose(next_states['pov'], (0, 1, 4, 2, 3)) / 255 - 0.5,
+        device=device,
+        dtype=torch.float)
+
+    actions = torch.tensor(
+        env_spec.action_space.flat_map(actions),
+        device=device,
+        dtype=torch.float
+    )
+
+    rewards = torch.tensor(rewards, device=device, dtype=torch.float)
+
+    discounts = torch.tensor(1-dones, device=device, dtype=torch.float)
+
+    return obs, actions, rewards, discounts
+
 def segs_to_batch(segs, env_spec):
 
     device = global_device()
