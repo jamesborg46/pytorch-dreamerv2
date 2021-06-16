@@ -19,7 +19,7 @@ defaults:
     kl: 0.1
 
   logging:
-    log_vid_freq: 20
+    log_vid_freq: 3
 
   world:
     lr: 0.0002

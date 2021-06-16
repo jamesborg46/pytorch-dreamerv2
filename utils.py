@@ -232,6 +232,44 @@ def log_reconstructions(eps,
             }, step=itr)
 
 
+def sample_minerl_segments(data, n=1, segment_length=50):
+    episodes = np.random.choice(len(data), size=n)
+    observations = []
+    actions = []
+    rewards = []
+    dones = []
+    for i in episodes:
+        ep = data[i]
+        length = len(ep['observations'])
+        start = min(np.random.randint(length),
+                    length-segment_length)
+        end = start + segment_length
+
+        observations.append(ep['observations'][start:end])
+        actions.append(ep['actions'][start:end])
+        rewards.append(ep['rewards'][start:end])
+        dones.append(ep['dones'][start:end])
+
+    device = global_device()
+
+    obs = torch.tensor(
+        np.transpose(observations, (0, 1, 4, 2, 3)) / 255 - 0.5,
+        device=device,
+        dtype=torch.float)
+
+    actions = torch.tensor(
+        np.array(actions),
+        device=device,
+        dtype=torch.float
+    )
+
+    rewards = torch.tensor(np.array(rewards), device=device, dtype=torch.float)
+
+    discounts = torch.tensor(1-np.array(dones), device=device, dtype=torch.float)
+
+    return obs, actions, rewards, discounts
+
+
 def minerl_segs_to_batch(segs, env_spec):
 
     device = global_device()
