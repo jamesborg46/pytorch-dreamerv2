@@ -44,12 +44,20 @@ def kl_loss(posterior, prior, config):
     return kl_loss
 
 
-class StraightThroughOneHotDist(torch.distributions.OneHotCategorical):
+# class StraightThroughOneHotDist(torch.distributions.OneHotCategorical):
 
-    def rsample(self, sample_shape=torch.Size()):
-        sample = self.sample(sample_shape).type(torch.float)
-        sample += self.probs - self.probs.detach()  # Straight through gradients trick
-        return sample
+#     def rsample(self, sample_shape=torch.Size()):
+#         # Straight through gradient trick
+#         sample = (self.sample(sample_shape).type(torch.float)
+#                   + self.probs - self.probs.detach())
+#         if not(self.probs == self.probs.detach()).all():
+#             print('found it')
+#             breakpoint()
+#         values, _ = sample.max(dim=-1)
+#         if not (values == 1.).all():
+#             print('found it 2')
+#             breakpoint()
+#         return sample
 
 
 class WorldModel(torch.nn.Module):
@@ -407,7 +415,8 @@ class RSSM(torch.nn.Module):
 
         self.register_parameter(
             name='cell_initial_state',
-            param=nn.Parameter(torch.zeros(self.det_state_size))
+            param=nn.Parameter(torch.zeros(self.det_state_size,
+                                           device=global_device()))
         )
 
         self.cell = nn.GRUCell(input_size=self.det_state_size,
@@ -438,10 +447,12 @@ class RSSM(torch.nn.Module):
         state = {
             'logits': torch.zeros(batch_size,
                                   self.stoch_state_size,
-                                  self.stoch_state_classes).to(global_device()),
+                                  self.stoch_state_classes,
+                                  device=global_device()),
             'stoch': torch.zeros(batch_size,
                                  self.stoch_state_size,
-                                 self.stoch_state_classes).to(global_device()),
+                                 self.stoch_state_classes,
+                                 device=global_device()),
             'deter': self.cell_initial_state.repeat([batch_size, 1])
         }
         return state
@@ -461,7 +472,9 @@ class RSSM(torch.nn.Module):
             self.stoch_state_size,
             self.stoch_state_classes
         )
-        prior = StraightThroughOneHotDist(logits=logits)
+        # prior = StraightThroughOneHotDist(logits=logits)
+        prior = torch.distributions.OneHotCategoricalStraightThrough(
+            logits=logits)
         return prior, deter
 
     def observe_step(self, deter, embed):
@@ -473,7 +486,9 @@ class RSSM(torch.nn.Module):
             self.stoch_state_size,
             self.stoch_state_classes
         )
-        posterior = StraightThroughOneHotDist(logits=logits)
+        # posterior = StraightThroughOneHotDist(logits=logits)
+        posterior = torch.distributions.OneHotCategoricalStraightThrough(
+            logits=logits)
         return posterior
 
 
@@ -558,5 +573,8 @@ class MLP(torch.nn.Module):
         elif self.dist == 'bernoulli':
             return torch.distributions.Bernoulli(logits=logits)
         elif self.dist == 'onehot':
-            return StraightThroughOneHotDist(logits=logits)
+            # return StraightThroughOneHotDist(logits=logits)
+            return torch.distributions.OneHotCategoricalStraightThrough(
+                logits=logits)
+
 

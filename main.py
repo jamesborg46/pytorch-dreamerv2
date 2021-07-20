@@ -2,35 +2,32 @@
 """
 TODO
 """
-import torch
-import torch.nn.functional as F  # noqa: F401
+import argparse
+import os
+import pickle
+import socket
+import time
 
-from garage import wrap_experiment
-from garage.envs import GymEnv
-from garage.envs.wrappers import (
-    ClipReward, EpisodicLife,  FireReset, Grayscale,  Noop, StackFrames)
-from garage.experiment.deterministic import set_seed
-from garage.torch import set_gpu_mode
-from garage.sampler import LocalSampler, RaySampler, DefaultWorker, VecWorker
-from garage.trainer import Trainer
-from garage.torch.optimizers import OptimizerWrapper  # noqa: F401
-
+import dowel
 import gym
 import gym.envs.atari
-from replay_buffer import ReplayBuffer # noqa: F401
-from dreamer import Dreamer
-from models import WorldModel, ActorCritic
-from wrappers import Renderer, Resize, MaxAndSkip
-from utils import set_config, get_config, RandomPolicy
-
-import time
-import os
-import argparse
-import socket
-import json
-import pickle
-import dowel
+import torch
+import torch.nn.functional as F  # type: ignore  # noqa: F401
 from dowel import logger
+from garage import wrap_experiment
+from garage.envs import GymEnv
+from garage.envs.wrappers import EpisodicLife, Grayscale, Noop
+from garage.experiment.deterministic import set_seed
+from garage.sampler import DefaultWorker, LocalSampler, RaySampler, VecWorker
+from garage.torch import set_gpu_mode
+from garage.torch.optimizers import OptimizerWrapper  # noqa: F401
+from garage.trainer import Trainer
+
+from dreamer import Dreamer
+from models import ActorCritic, WorldModel
+from replay_buffer import ReplayBuffer  # noqa: F401
+from utils import RandomPolicy, get_config, set_config
+from wrappers import MaxAndSkip, Renderer, Resize
 
 
 def dreamer(ctxt, gpu_id=0):
@@ -38,7 +35,6 @@ def dreamer(ctxt, gpu_id=0):
     snapshot_dir = ctxt.snapshot_dir
 
     CONFIG = get_config()
-
     env = gym.envs.atari.AtariEnv(
         CONFIG.env.name, obs_type='image', frameskip=1,
         repeat_action_probability=0.25, full_action_space=True)
@@ -68,25 +64,34 @@ def dreamer(ctxt, gpu_id=0):
     elif CONFIG.training.sampler == "local":
         Sampler = LocalSampler
 
-    sampler = Sampler(agents=agent,  # noqa: F841
-                      envs=env,
-                      max_episode_length=max_episode_length,
-                      n_workers=8)
+    sampler = Sampler(  # noqa: F841
+        agents=agent,
+        envs=env,
+        max_episode_length=max_episode_length,
+        n_workers=8)
 
-    log_sampler = Sampler(agents=agent,  # noqa: F841
-                      envs=env,
-                      max_episode_length=max_episode_length,
-                      n_workers=4)
+    log_sampler = Sampler(  # noqa: F841
+        agents=agent,
+        envs=env,
+        max_episode_length=max_episode_length,
+        n_workers=4)
 
-    set_gpu_mode(True, gpu_id=gpu_id)
+    if gpu_id < 0:
+        set_gpu_mode(False)
+        mixed_prec = False
+    else:
+        set_gpu_mode(True, gpu_id=gpu_id)
+        mixed_prec = True
 
     algo = Dreamer(
         env.spec,
         sampler=sampler,
         log_sampler=log_sampler,
+        sampler_type=Sampler,
         world_model=world_model,
         agent=agent,
         buf=buf,
+        mixed_prec=mixed_prec,
     )
 
     trainer.setup(
@@ -140,3 +145,4 @@ if __name__ == '__main__':
     )
 
     dreamer(gpu_id=kwargs['gpu'])
+
