@@ -35,7 +35,7 @@ class ReplayBuffer(abc.ABC):
 
     def __init__(self,
                  env_spec,
-                 segment_length=50,
+                 segment_length,
                  max_capacity=500000,
                  flatten=True):
 

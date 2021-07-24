@@ -8,6 +8,7 @@ from torch._six import inf
 import torch.nn.functional as F
 from garage.torch import global_device
 from garage.torch.policies import Policy
+import gym
 from utils import get_config
 from dowel import logger
 
@@ -42,22 +43,6 @@ def kl_loss(posterior, prior, config):
         logger._warn(f'LHS and RHS of KL differ by: {max_dif}')
 
     return kl_loss
-
-
-# class StraightThroughOneHotDist(torch.distributions.OneHotCategorical):
-
-#     def rsample(self, sample_shape=torch.Size()):
-#         # Straight through gradient trick
-#         sample = (self.sample(sample_shape).type(torch.float)
-#                   + self.probs - self.probs.detach())
-#         if not(self.probs == self.probs.detach()).all():
-#             print('found it')
-#             breakpoint()
-#         values, _ = sample.max(dim=-1)
-#         if not (values == 1.).all():
-#             print('found it 2')
-#             breakpoint()
-#         return sample
 
 
 class WorldModel(torch.nn.Module):
@@ -251,6 +236,11 @@ class ActorCritic(Policy):
         self.config = config
         self.random = random
 
+        if isinstance(env_spec.action_space, gym.spaces.Dict):
+            self.action_size = env_spec.action_space.flat_dim
+        else:
+            self.action_size = env_spec.action_space.n
+
         self.latent_state_size = (
             self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
             + self.config.rssm.det_state_size
@@ -258,7 +248,7 @@ class ActorCritic(Policy):
 
         self.actor = MLP(
             input_shape=self.latent_state_size,
-            out_shape=env_spec.action_space.n,
+            out_shape=self.action_size,
             units=self.config.actor.units,
             dist='onehot')
 
@@ -279,7 +269,7 @@ class ActorCritic(Policy):
 
     def get_action(self, observation):
         if self.random:
-            action_space = self._env_spec.action_space
+            action_space = self.action_size
             dist = torch.distributions.Categorical(
                 probs=torch.ones(action_space.n) / action_space.n
             )
@@ -405,7 +395,11 @@ class RSSM(torch.nn.Module):
         super().__init__()
         self._env_spec = env_spec
         self.config = config
-        self.action_size = env_spec.action_space.n
+
+        if isinstance(env_spec.action_space, gym.spaces.Dict):
+            self.action_size = env_spec.action_space.flat_dim
+        else:
+            self.action_size = env_spec.action_space.n
 
         self.embed_size = self.config.image_encoder.N * 32
         self.stoch_state_classes = self.config.rssm.stoch_state_classes
@@ -573,7 +567,6 @@ class MLP(torch.nn.Module):
         elif self.dist == 'bernoulli':
             return torch.distributions.Bernoulli(logits=logits)
         elif self.dist == 'onehot':
-            # return StraightThroughOneHotDist(logits=logits)
             return torch.distributions.OneHotCategoricalStraightThrough(
                 logits=logits)
 

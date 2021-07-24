@@ -1,19 +1,22 @@
-from dowel import tabular, logger
-from garage import EnvSpec
-from garage.np.algos import RLAlgorithm
-from utils import RandomPolicy
-from garage.sampler import RaySampler, LocalSampler
-from utils import (get_config, segs_to_batch, log_episodes,
-                   log_reconstructions, log_imagined_rollouts)
-import torch
-from torch.cuda.amp import autocast
-from torch import optim
-from garage.torch import global_device
-from tqdm import tqdm
 import os.path as osp
 import time
-import numpy as np
 from contextlib import nullcontext
+from typing import Union
+
+import models
+import numpy as np
+import replay_buffer
+import torch
+from dowel import logger, tabular
+from garage import EnvSpec
+from garage.np.algos import RLAlgorithm
+from garage.sampler import LocalSampler, RaySampler
+from garage.torch import global_device
+from torch import optim
+from torch.cuda.amp import autocast
+from tqdm import tqdm
+from utils import (RandomPolicy, get_config, log_episodes,
+                   log_imagined_rollouts, log_reconstructions, segs_to_batch)
 
 scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -22,20 +25,18 @@ class Dreamer(RLAlgorithm):
 
     def __init__(self,
                  env_spec: EnvSpec,
-                 sampler,
-                 log_sampler,
-                 sampler_type,
-                 world_model,
-                 agent,
-                 buf,
-                 mixed_prec,
+                 sampler: Union[LocalSampler, RaySampler],
+                 log_sampler: Union[LocalSampler, RaySampler],
+                 world_model: models.WorldModel,
+                 agent: models.ActorCritic,
+                 buf: replay_buffer.ReplayBuffer,
+                 mixed_prec: bool,
                  ):
 
         device = global_device()
         self.env_spec = env_spec
         self._sampler = sampler
         self._log_sampler = log_sampler
-        self._sampler_type = sampler_type
         self.world_model = world_model.to(device)
         self.agent = agent.to(device)
         self.buffer = buf
@@ -64,9 +65,10 @@ class Dreamer(RLAlgorithm):
             weight_decay=get_config().critic.wd)
 
     def agent_update(self):
-        if self._sampler_type == RaySampler:
+        sampler_type = type(self._sampler)
+        if sampler_type == RaySampler:
             return {k: v.cpu() for k, v in self.agent.state_dict().items()}
-        elif self._sampler_type == LocalSampler:
+        elif sampler_type == LocalSampler:
             return {k: v for k, v in self.agent.state_dict().items()}
 
     def train(self, trainer):
@@ -259,7 +261,8 @@ class Dreamer(RLAlgorithm):
 
     def _initialize_dataset(self, trainer, seed_episodes=5):
         random_policy = RandomPolicy(self.env_spec)
-        random_sampler = self._sampler_type(
+        sampler_type = type(self._sampler)
+        random_sampler = sampler_type(
             agents=random_policy,
             envs=trainer._env,
             max_episode_length=self.env_spec.max_episode_length,

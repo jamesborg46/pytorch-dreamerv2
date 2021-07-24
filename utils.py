@@ -1,21 +1,25 @@
-from garage.torch.policies.stochastic_policy import StochasticPolicy
-from garage import EnvSpec
-from garage.torch import global_device
-from garage.sampler.env_update import EnvUpdate
 import collections.abc
-import gym
 import json
 import math
-import torch
 import os
 import os.path as osp
-import ray
-import wandb
-import numpy as np
 
-from ruamel.yaml import YAML
+import akro
+import gym
+import numpy as np
+import ray
+import torch
 from dotmap import DotMap
+from garage import EnvSpec
+from garage.sampler.env_update import EnvUpdate
+from garage.torch import global_device
+from garage.torch.policies import Policy
+from garage.torch.policies.stochastic_policy import StochasticPolicy
+from ruamel.yaml import YAML
 from video import export_video
+
+import wandb
+
 
 def update(d, u):
     for k, v in u.items():
@@ -233,26 +237,112 @@ def log_reconstructions(eps,
             }, step=itr)
 
 
+def flatten_segs_dicts(segs, attr, dtype=torch.float):
+    """flattens dicts in segs
+
+    Parameters
+    ----------
+    segs : TOD
+    attr : TODO
+
+    Returns
+    -------
+    TODO
+
+    """
+    keys = getattr(segs[0], attr)[0].keys()
+    device = global_device()
+    dl = {
+        k: torch.tensor(
+            # must wrap in np or else very slow
+            np.array([[dic[k] for dic in getattr(seg, attr)] for seg in segs]),
+            device=device,
+            dtype=dtype
+        )
+        for k in keys
+    }
+    return dl
+
+
+def preprocess_obs_imgs(obs_imgs: torch.Tensor):
+    config = get_config()
+    seg_length = config.training.seg_length
+    num_segs = config.training.num_segs_per_batch
+    height = config.image.height
+    width = config.image.width
+    channels = config.image.color_channels
+
+    obs_imgs = obs_imgs / 255 - 0.5
+
+    if obs_imgs.shape == (num_segs, seg_length, height, width):
+        obs_imgs = obs_imgs.unsqueeze(2)
+    elif obs_imgs.shape == (num_segs, seg_length, height, width, channels):
+        obs_imgs = obs_imgs.permute(0, 1, 4, 2, 3)
+    elif obs_imgs.shape == (num_segs, seg_length, channels, height, width):
+        pass
+    else:
+        raise ValueError(
+            f'Found unexpected shape {obs_imgs.shape} \n'
+            f'seg_length: {seg_length} \n',
+            f'num_segs: {num_segs} \n',
+            f'height: {height} \n',
+            f'width: {width} \n',
+            f'channels: {channels} \n',
+        )
+
+    return obs_imgs
+
+
+def prepare_observations(segs, observation_space):
+    device = global_device()
+
+    if type(observation_space) == akro.Image:
+        obs = [seg.next_observations for seg in segs]
+        obs = torch.tensor(np.array(obs), device=device, dtype=torch.float)
+        obs = preprocess_obs_imgs(obs)
+
+    elif type(observation_space) == akro.Dict:
+        obs = flatten_segs_dicts(segs, 'next_observations')
+        for key in obs.keys():
+            if key == 'pov':
+                obs['pov'] = preprocess_obs_imgs(obs['pov'])
+            elif key == 'vector':
+                pass
+            else:
+                raise ValueError(f'obs key {key} unaccounted for')
+
+    return obs
+
+
+def prepare_actions(segs, action_space):
+    device = global_device()
+    if type(action_space) == akro.Discrete:
+        actions = [action_space.flatten_n(seg.actions) for seg in segs]
+        actions = torch.tensor(
+            np.array(actions), device=device, dtype=torch.float)
+    if type(action_space) == akro.Dict:
+        actions = flatten_segs_dicts(segs, 'actions')
+        for key in actions.keys():
+            if key == 'vector':
+                pass
+            else:
+                raise ValueError(f'action key {key} unaccounted for')
+
+    return actions
+
+
 def segs_to_batch(segs, env_spec):
 
     device = global_device()
-    obs = []
-    actions = []
     rewards = []
     discounts = []
 
     for seg in segs:
-        obs.append(seg.next_observations)
-        actions.append(env_spec.action_space.flatten_n(seg.actions))
         rewards.append(seg.rewards)
         discounts.append(1 - seg.terminals)
 
-    obs = torch.tensor(np.array(obs), device=device, dtype=torch.float)
-    obs = obs.unsqueeze(2)
-    obs = obs / 255 - 0.5
-
-    actions = torch.tensor(
-        np.array(actions), device=device, dtype=torch.float)
+    actions = prepare_actions(segs, env_spec.action_space)
+    obs = prepare_observations(segs, env_spec.observation_space)
 
     rewards = torch.tensor(
         np.array(rewards), device=device, dtype=torch.float)
@@ -263,48 +353,21 @@ def segs_to_batch(segs, env_spec):
     return obs, actions, rewards, discounts
 
 
-class RandomPolicy(StochasticPolicy):
+class RandomPolicy(Policy):
 
     def __init__(self, env_spec: EnvSpec):
         super().__init__(env_spec=env_spec, name="RandomPolicy")
-
-    def _get_rand_distribution(self, action_space):
-        if isinstance(action_space, gym.spaces.Discrete):
-            dist = torch.distributions.Categorical(
-                probs=torch.ones(action_space.n) / action_space.n
-            )
-        elif isinstance(action_space, gym.spaces.Box):
-            raise NotImplementedError()
-        elif isinstance(action_space, gym.spaces.Dict):
-            raise NotImplementedError()
-        else:
-            raise NotImplementedError()
-
-        return dist
 
     @property
     def env_spec(self):
         return self._env_spec
 
-    def forward(self, observations):
-        """Compute the action distributions from the observations.
+    def get_action(self, observation):
+        return self.action_space.sample(), {}
 
-        Args:
-            observations (torch.Tensor): Batch of observations on default
-                torch device.
-
-        Returns:
-            torch.distributions.Distribution: Batch distribution of actions.
-            dict[str, torch.Tensor]: Additional agent_info, as torch Tensors.
-                Do not need to be detached, and can be on any device.
-        """
-
-        dist = self._get_rand_distribution(self.action_space)
-        dist = dist.expand((observations.shape[0],))
-        info = dict()
-        return dist, info
+    def get_actions(self, observations):
+        pass
 
 
 def preprocess_img(img):
     return img / 255.
-
