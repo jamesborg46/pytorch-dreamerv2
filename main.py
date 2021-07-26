@@ -24,10 +24,10 @@ from garage.torch.optimizers import OptimizerWrapper  # noqa: F401
 from garage.trainer import Trainer
 
 from dreamer import Dreamer
-from models import ActorCritic, WorldModel
+from models import ActorCritic, WorldModel, World
 from replay_buffer import ReplayBuffer  # noqa: F401
 from utils import RandomPolicy, get_config, set_config
-from wrappers import MaxAndSkip, Renderer, Resize
+from wrappers import MaxAndSkip, Renderer, Resize, Preprocess
 
 
 def dreamer(ctxt, gpu_id=0):
@@ -35,16 +35,21 @@ def dreamer(ctxt, gpu_id=0):
     snapshot_dir = ctxt.snapshot_dir
 
     CONFIG = get_config()
+    max_episode_length = (
+        108000 / 4 if CONFIG.training.max_episode_length is None
+        else CONFIG.training.max_episode_length
+    )
+
     env = gym.envs.atari.AtariEnv(
         CONFIG.env.name, obs_type='image', frameskip=1,
         repeat_action_probability=0.25, full_action_space=True)
     env = Noop(env, noop_max=30)
     env = MaxAndSkip(env, skip=4)
     # env = EpisodicLife(env)
-    if CONFIG.image.color_channels == 1:
-        env = Grayscale(env)
-    env = Resize(env, CONFIG.image.height, CONFIG.image.height)
-    max_episode_length = 108000 / 4
+    # if CONFIG.image.color_channels == 1:
+    #     env = Grayscale(env)
+    # env = Resize(env, CONFIG.image.height, CONFIG.image.height)
+    env = Preprocess(env, world_type=World.ATARI)
     env = Renderer(env, directory=os.path.join(snapshot_dir, 'videos'))
     env = GymEnv(env, max_episode_length=max_episode_length, is_image=True)
 
@@ -56,8 +61,13 @@ def dreamer(ctxt, gpu_id=0):
     trainer = Trainer(ctxt)
 
     buf = ReplayBuffer(env.spec)
-    world_model = WorldModel(env.spec, config=CONFIG)
-    agent = ActorCritic(env.spec, world_model, config=CONFIG)
+    world_model = WorldModel(env.spec,
+                             config=CONFIG,
+                             world_type=World.ATARI)
+    agent = ActorCritic(env.spec,
+                        world_model,
+                        config=CONFIG,
+                        world_type=World.ATARI)
 
     if CONFIG.training.sampler == "ray":
         Sampler = RaySampler
@@ -68,13 +78,13 @@ def dreamer(ctxt, gpu_id=0):
         agents=agent,
         envs=env,
         max_episode_length=max_episode_length,
-        n_workers=8)
+        n_workers=CONFIG.samplers.agent.n)
 
     log_sampler = Sampler(  # noqa: F841
         agents=agent,
         envs=env,
         max_episode_length=max_episode_length,
-        n_workers=4)
+        n_workers=CONFIG.samplers.log.n)
 
     if gpu_id < 0:
         set_gpu_mode(False)

@@ -1,19 +1,16 @@
+from enum import Enum, auto
+from typing import Callable, Union, Optional, Dict
+
+import akro
+import gym
 import torch
-import torch.nn.functional as F
-from torch import nn
-from torch import distributions
-from torch.distributions import kl_divergence, Independent
-from torch.distributions.utils import logits_to_probs
-from torch._six import inf
-import torch.nn.functional as F
+from dowel import logger
 from garage.torch import global_device
 from garage.torch.policies import Policy
-import gym
-from utils import get_config
-from dowel import logger
-
-# def categorical_kl(probs_a, probs_b):
-#     return torch.sum(probs_a * torch.log(probs_a / probs_b), dim=[-1, -2])
+from torch import distributions, nn
+from torch._six import inf
+from torch.distributions import Independent, kl_divergence
+from torch.distributions.utils import logits_to_probs
 
 
 def categorical_kl(logits_p, logits_q):
@@ -45,21 +42,52 @@ def kl_loss(posterior, prior, config):
     return kl_loss
 
 
+class World(Enum):
+    ATARI = auto()
+    DIAMOND = auto()
+    BASALT = auto()
+
+
 class WorldModel(torch.nn.Module):
 
-    def __init__(self, env_spec, config):
+    def __init__(self,
+                 env_spec,
+                 config,
+                 world_type: World = World.DIAMOND):
         super().__init__()
         self.env_spec = env_spec
         self.config = config
-
-        self.rssm = RSSM(env_spec, config=self.config)
-        self.image_encoder = ImageEncoder(config=self.config)
-        self.image_decoder = ImageDecoder(config=self.config)
+        self.world_type = world_type
 
         self.latent_state_size = (
-            self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
+            self.config.rssm.stoch_state_classes
+            * self.config.rssm.stoch_state_size
             + self.config.rssm.det_state_size
         )
+
+        obs_space = env_spec.observation_space
+        if world_type == World.ATARI:
+            assert type(obs_space) == akro.Image
+        elif world_type == World.DIAMOND:
+            assert type(obs_space) == akro.Dict and \
+                obs_space.spaces.keys() == set(['pov', 'vector'])
+
+            self.obs_vector_decoder = MLP(
+                input_shape=self.latent_state_size,
+                units=[128, ],
+                out_shape=64,
+                dist='mse',
+                scale=0.1)
+
+        elif world_type == World.BASALT:
+            raise NotImplementedError()
+        else:
+            raise ValueError()
+
+        self.rssm = RSSM(env_spec, config=self.config)
+
+        self.image_encoder = ImageEncoder(config=self.config)
+        self.image_decoder = ImageDecoder(config=self.config)
 
         self.reward_predictor = MLP(
             input_shape=self.latent_state_size,
@@ -71,36 +99,101 @@ class WorldModel(torch.nn.Module):
             units=self.config.discount_head.units,
             dist='bernoulli')
 
-    def reconstruct(self, observations, actions):
-        steps, channels, height, width = observations.shape
-        embedded_observations = self.image_encoder(
-            observations)
-        out = self.observe(embedded_observations.unsqueeze(0),
-                                actions.unsqueeze(0))
-        latent_states = out['latent_states'].reshape(steps,
-                                                     self.latent_state_size)
-        image_recon = self.image_decoder(latent_states).reshape(
-            steps, channels, height, width)
-        return image_recon
+    # def reconstruct(self, observations, actions):
+    #     steps, channels, height, width = observations.shape
+    #     embedded_observations = self.image_encoder(
+    #         observations)
+    #     out = self.observe(embedded_observations.unsqueeze(0),
+    #                             actions.unsqueeze(0))
+    #     latent_states = out['latent_states'].reshape(steps,
+    #                                                  self.latent_state_size)
+    #     image_recon = self.image_decoder(latent_states).reshape(
+    #         steps, channels, height, width)
+    #     return image_recon
 
     def forward(self, observations, actions):
-        segs, steps, channels, height, width = observations.shape
-        flattened_observations = observations.reshape(
-            segs*steps, channels, height, width)
-        embedded_observations = self.image_encoder(
-            flattened_observations).reshape(segs, steps, -1)
+        embedded_observations = self.embed_observations(observations)
+        actions = self.embed_actions(actions)
         out = self.observe(embedded_observations, actions)
         out['reward_dist'] = self.reward_predictor(out['latent_states'])
         out['discount_dist'] = self.discount_predictor(out['latent_states'])
-        flattened_latent_states = (
-            out['latent_states'].reshape(segs*steps, self.latent_state_size))
-        mean = self.image_decoder(flattened_latent_states).reshape(
-            segs, steps, channels, height, width)
-        norm = distributions.Normal(loc=mean, scale=1)
-        image_recon_dist = distributions.Independent(norm, 3)
-        assert image_recon_dist.batch_shape == (segs, steps)
-        out['image_recon_dist'] = image_recon_dist
+        out['recon_obs'] = self.reconstruct_observations(out['latent_states'])
         return out
+
+    def encode_images(self, images) -> torch.Tensor:
+        ndim = images.ndim
+        if ndim == 3:
+            channels, height, width = images.shape
+            image = images.reshape(1, channels, height, width)
+            embedded_images = self.image_encoder(image).flatten()
+        elif ndim == 5:
+            segs, steps, channels, height, width = images.shape
+            flattened_images = images.reshape(
+                segs*steps, channels, height, width)
+            embedded_images = self.image_encoder(
+                flattened_images).reshape(segs, steps, -1)
+        else:
+            raise ValueError()
+        return embedded_images
+
+    def embed_observations(self, observations):
+        if self.world_type == World.ATARI:
+            return self.encode_images(observations['pov'])
+
+        elif self.world_type == World.DIAMOND:
+            embedded_pov = self.encode_images(observations['pov'])
+            embedded_observations = torch.cat(
+                [embedded_pov, observations['vector']],
+                dim=-1)
+            return embedded_observations
+
+        elif self.world_type == World.BASALT:
+            raise NotImplementedError()
+
+        else:
+            raise ValueError()
+
+    def embed_actions(self, actions):
+        if self.world_type == World.ATARI:
+            return actions
+
+        elif self.world_type == World.DIAMOND:
+            return actions['vector']
+
+        elif self.world_type == World.BASALT:
+            raise NotImplementedError()
+
+        else:
+            raise ValueError()
+
+    def reconstruct_observations(self, latent_states: torch.Tensor) \
+            -> Dict[str, torch.distributions.Distribution]:
+        steps = self.config.training.seg_length
+        segs = self.config.training.num_segs_per_batch
+        height = self.config.image.height
+        width = self.config.image.width
+        channels = self.config.image.color_channels
+        recon_obs = dict()
+
+        flattened_latent_states = latent_states.reshape(segs*steps,
+                                                        self.latent_state_size)
+        image_mean = self.image_decoder(flattened_latent_states).reshape(
+            segs, steps, channels, height, width)
+        norm = distributions.Normal(loc=image_mean, scale=1)
+        image_recon_dist = distributions.Independent(norm, 3)
+        assert image_recon_dist.batch_shape == (segs, steps) and \
+            image_recon_dist.event_shape == (channels, height, width)
+        recon_obs['image_recon_dist'] = image_recon_dist
+
+        if self.world_type == World.DIAMOND:
+            vector_recon_dist = self.obs_vector_decoder(
+                latent_states)
+            vector_recon_dist = distributions.Independent(vector_recon_dist, 1)
+            assert vector_recon_dist.batch_shape == (segs, steps) and \
+                vector_recon_dist.event_shape == (64, )
+            recon_obs['vector_recon_dist'] = vector_recon_dist
+
+        return recon_obs
 
     def imagine(self,
                 initial_stoch,
@@ -144,15 +237,17 @@ class WorldModel(torch.nn.Module):
 
         return actions, latents, rewards, discounts
 
-    def observe(self, embedded_observations, actions):
-        segs, steps, embedding_size = embedded_observations.shape
+    def observe(self,
+                embedded_observations: torch.Tensor,
+                actions: torch.Tensor) -> Dict[str, Union[torch.Tensor, Dict]]:
+        segs, steps, _ = embedded_observations.shape
         assert segs == actions.shape[0]
         assert steps == actions.shape[1]
 
-        swap = lambda t: torch.swapaxes(t, 0, 1)
+        swap = lambda t: torch.swapaxes(t, 0, 1)  # noqa: E731
 
         # Change from SEGS x STEPS x N -> STEPS x SEGS x N
-        # This facilitates 
+        # This facilitates
         embedded_observations = swap(embedded_observations)
         actions = swap(actions)
 
@@ -199,10 +294,22 @@ class WorldModel(torch.nn.Module):
         kl_loss = out['kl_losses'].mean()
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
-        recon_loss = -out['image_recon_dist'].log_prob(observation_batch).mean()
+
+        recon_loss = (
+            -out['recon_obs']['image_recon_dist']
+            .log_prob(observation_batch['pov']).mean()
+        )
+
+        if self.world_type == World.DIAMOND:
+            vector_scale = self.config.loss_scales.recon_vector
+            recon_loss += (
+                vector_scale * -out['recon_obs']['vector_recon_dist']
+                .log_prob(observation_batch['vector']).mean()
+            )
 
         reward_mae = torch.abs(out['reward_dist'].mean - reward_batch).mean()
-        discount_mae = torch.abs(out['discount_dist'].mean - discount_batch).mean()
+        discount_mae = torch.abs(out['discount_dist'].mean
+                                 - discount_batch).mean()
 
         loss = (
             self.config.loss_scales.reward * reward_loss +
@@ -230,27 +337,49 @@ class ActorCritic(Policy):
                  world_model,
                  config,
                  n_envs=1,
-                 random=False):
+                 random=False,
+                 world_type: World = World.DIAMOND):
         super().__init__(env_spec=env_spec, name='ActorCritic')
         self.world_model = world_model
         self.config = config
         self.random = random
-
-        if isinstance(env_spec.action_space, gym.spaces.Dict):
-            self.action_size = env_spec.action_space.flat_dim
-        else:
-            self.action_size = env_spec.action_space.n
+        self.world_type = world_type
 
         self.latent_state_size = (
-            self.config.rssm.stoch_state_classes * self.config.rssm.stoch_state_size
+            self.config.rssm.stoch_state_classes
+            * self.config.rssm.stoch_state_size
             + self.config.rssm.det_state_size
         )
+
+        obs_space = env_spec.observation_space
+        if world_type == World.ATARI:
+            assert type(obs_space) == akro.Image and \
+                type(env_spec.action_space) == akro.Discrete
+            self.action_size = env_spec.action_space.n
+            actor_dist = 'onehot'
+            ind_dims = None
+            scale = None
+
+        elif world_type == World.DIAMOND:
+            assert type(obs_space) == akro.Dict and \
+                type(env_spec.action_space) == akro.Dict
+            self.action_size = env_spec.action_space.flat_dim
+            actor_dist = 'mse'
+            ind_dims = 1
+            scale = 0.1
+
+        elif world_type == World.BASALT:
+            raise NotImplementedError()
+        else:
+            raise ValueError()
 
         self.actor = MLP(
             input_shape=self.latent_state_size,
             out_shape=self.action_size,
             units=self.config.actor.units,
-            dist='onehot')
+            dist=actor_dist,
+            ind_dims=ind_dims,
+            scale=scale)
 
         self.critic = MLP(
             input_shape=self.latent_state_size,
@@ -267,25 +396,34 @@ class ActorCritic(Policy):
         self.initial_state = self.world_model.rssm.initial_state(n_envs)
         self.deter = self.initial_state['deter']
 
+    def pack_action(self, action):
+        if self.world_type == World.ATARI:
+            return torch.argmax(action, dim=-1).item()
+        elif self.world_type == World.DIAMOND:
+            return {'vector': action.cpu().numpy()}
+        elif self.world_type == World.BASALT:
+            raise NotImplementedError()
+        else:
+            raise ValueError()
+
     def get_action(self, observation):
-        if self.random:
-            action_space = self.action_size
-            dist = torch.distributions.Categorical(
-                probs=torch.ones(action_space.n) / action_space.n
-            )
-            return dist.sample(), {}
+        # if self.random:
+        #     action_space = self.action_size
+        #     dist = torch.distributions.Categorical(
+        #         probs=torch.ones(action_space.n) / action_space.n
+        #     )
+        #     return dist.sample(), {}
 
         with torch.no_grad():
-            obs = torch.tensor(
-                observation, device=global_device(), dtype=torch.float)
+            observation = {
+                k: torch.tensor(v, device=global_device(), dtype=torch.float)
+                for k, v in observation.items()
+            }
 
-            obs = obs.unsqueeze(0)  # Adding batch dimension
-            obs = obs / 255 - 0.5
-
-            if self.config.image.color_channels == 1:
-                obs = obs.unsqueeze(1)  # Adding color channel
-
-            embedded_obs = self.world_model.image_encoder(obs)
+            embedded_obs = (
+                self.world_model.embed_observations(observation)
+                    .unsqueeze(0)  # adding batch dimensions
+            )
 
             posterior = self.world_model.rssm.observe_step(
                 deter=self.deter, embed=embedded_obs)
@@ -297,17 +435,17 @@ class ActorCritic(Policy):
 
             action = self.actor(latent_state).rsample().unsqueeze(0)
 
-            prior, deter = self.world_model.rssm.imagine_step(
+            _, deter = self.world_model.rssm.imagine_step(
                 stoch, self.deter, action)
 
             self.deter = deter
 
-        return torch.argmax(action[0]).item(), {}
+        return self.pack_action(action[0]), {}
 
     def get_actions(self, observations):
         pass
 
-    def reset(self, do_resets=None):
+    def reset(self):
         self.deter = self.initial_state['deter']
 
     def forward(self, initial_stoch, initial_deter):
@@ -373,6 +511,9 @@ class ActorCritic(Policy):
             objective = policy.log_prob(action) * advantage
         elif self.config.actor.grad == 'dynamics':
             objective = target
+        else:
+            raise ValueError()
+
         ent_scale = self.config.actor.ent_scale
         objective += ent_scale * policy.entropy()
         actor_loss = -(objective * weights)[:-1].mean()
@@ -396,12 +537,22 @@ class RSSM(torch.nn.Module):
         self._env_spec = env_spec
         self.config = config
 
-        if isinstance(env_spec.action_space, gym.spaces.Dict):
+        if type(env_spec.action_space) == akro.Dict:
             self.action_size = env_spec.action_space.flat_dim
-        else:
+        elif type(env_spec.action_space) == akro.Discrete:
             self.action_size = env_spec.action_space.n
+        else:
+            raise ValueError()
 
-        self.embed_size = self.config.image_encoder.N * 32
+        obs_space = env_spec.observation_space
+        if type(obs_space) == akro.Image:
+            self.embed_size = self.config.image_encoder.N * 32
+        elif type(obs_space) == akro.Dict and \
+                obs_space.spaces.keys() == set(['pov', 'vector']):
+            self.embed_size = self.config.image_encoder.N * 32 + 64
+        else:
+            raise ValueError()
+
         self.stoch_state_classes = self.config.rssm.stoch_state_classes
         self.stoch_state_size = self.config.rssm.stoch_state_size
         self.det_state_size = self.config.rssm.det_state_size
@@ -493,9 +644,10 @@ class ImageEncoder(torch.nn.Module):
 
         Activation = eval(self.config.image_encoder.Activation)
         self.N = N = self.config.image_encoder.N
+        color_channels = self.config.image.color_channels
 
         self.model = nn.Sequential(
-            nn.Conv2d(1, N*1, 4, 2),
+            nn.Conv2d(color_channels, N*1, 4, 2),
             Activation(),
             nn.Conv2d(N*1, N*2, 4, 2),
             Activation(),
@@ -540,7 +692,6 @@ class ImageDecoder(torch.nn.Module):
         )
 
     def forward(self, embed):
-        batch_shape = embed.shape[0]
         x = self.dense(embed).reshape(-1, self.N*32, 1, 1)
         x = self.deconvolve(x)
         return x
@@ -548,10 +699,19 @@ class ImageDecoder(torch.nn.Module):
 
 class MLP(torch.nn.Module):
 
-    def __init__(self, input_shape, units, out_shape=1,
-                 dist='mse', Activation=torch.nn.ELU):
+    def __init__(
+            self,
+            input_shape,
+            units,
+            out_shape=1,
+            dist: Union[str, Callable] = 'mse',
+            scale: Optional[float] = 1.,
+            ind_dims: Optional[int] = None,
+            Activation=torch.nn.ELU):
         super().__init__()
         self.dist = dist
+        self.scale = scale
+        self.ind_dims = ind_dims
 
         self.net = nn.Sequential()
         for i, unit in enumerate(units):
@@ -563,11 +723,17 @@ class MLP(torch.nn.Module):
     def forward(self, features):
         logits = self.net(features).squeeze()
         if self.dist == 'mse':
-            return torch.distributions.Normal(loc=logits, scale=1)
+            dist = torch.distributions.Normal(loc=logits, scale=self.scale)
         elif self.dist == 'bernoulli':
-            return torch.distributions.Bernoulli(logits=logits)
+            dist = torch.distributions.Bernoulli(logits=logits)
         elif self.dist == 'onehot':
-            return torch.distributions.OneHotCategoricalStraightThrough(
+            dist = torch.distributions.OneHotCategoricalStraightThrough(
                 logits=logits)
+        else:
+            raise ValueError()
 
+        if self.ind_dims is not None:
+            dist = torch.distributions.Independent(
+                dist, reinterpreted_batch_ndims=self.ind_dims)
 
+        return dist

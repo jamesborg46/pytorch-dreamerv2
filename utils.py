@@ -3,6 +3,7 @@ import json
 import math
 import os
 import os.path as osp
+from typing import Union
 
 import akro
 import gym
@@ -81,18 +82,15 @@ def log_episodes(itr,
                  sampler,
                  policy,
                  agent_update,
-                 number_eps=None,
                  enable_render=False,
                  ):
+
+    CONFIG = get_config()
 
     if hasattr(sampler, '_worker_factory'):
         n_workers = sampler._worker_factory.n_workers
     else:
         n_workers = sampler._factory.n_workers
-
-    n_eps_per_worker = (
-        1 if number_eps is None else math.ceil(number_eps / n_workers)
-    )
 
     env_updates = []
 
@@ -108,7 +106,7 @@ def log_episodes(itr,
     )
 
     episodes = sampler.obtain_exact_episodes(
-        n_eps_per_worker=n_eps_per_worker,
+        n_eps_per_worker=CONFIG.samplers.log.eps,
         agent_update=agent_update,
     )
 
@@ -264,73 +262,6 @@ def flatten_segs_dicts(segs, attr, dtype=torch.float):
     return dl
 
 
-def preprocess_obs_imgs(obs_imgs: torch.Tensor):
-    config = get_config()
-    seg_length = config.training.seg_length
-    num_segs = config.training.num_segs_per_batch
-    height = config.image.height
-    width = config.image.width
-    channels = config.image.color_channels
-
-    obs_imgs = obs_imgs / 255 - 0.5
-
-    if obs_imgs.shape == (num_segs, seg_length, height, width):
-        obs_imgs = obs_imgs.unsqueeze(2)
-    elif obs_imgs.shape == (num_segs, seg_length, height, width, channels):
-        obs_imgs = obs_imgs.permute(0, 1, 4, 2, 3)
-    elif obs_imgs.shape == (num_segs, seg_length, channels, height, width):
-        pass
-    else:
-        raise ValueError(
-            f'Found unexpected shape {obs_imgs.shape} \n'
-            f'seg_length: {seg_length} \n',
-            f'num_segs: {num_segs} \n',
-            f'height: {height} \n',
-            f'width: {width} \n',
-            f'channels: {channels} \n',
-        )
-
-    return obs_imgs
-
-
-def prepare_observations(segs, observation_space):
-    device = global_device()
-
-    if type(observation_space) == akro.Image:
-        obs = [seg.next_observations for seg in segs]
-        obs = torch.tensor(np.array(obs), device=device, dtype=torch.float)
-        obs = preprocess_obs_imgs(obs)
-
-    elif type(observation_space) == akro.Dict:
-        obs = flatten_segs_dicts(segs, 'next_observations')
-        for key in obs.keys():
-            if key == 'pov':
-                obs['pov'] = preprocess_obs_imgs(obs['pov'])
-            elif key == 'vector':
-                pass
-            else:
-                raise ValueError(f'obs key {key} unaccounted for')
-
-    return obs
-
-
-def prepare_actions(segs, action_space):
-    device = global_device()
-    if type(action_space) == akro.Discrete:
-        actions = [action_space.flatten_n(seg.actions) for seg in segs]
-        actions = torch.tensor(
-            np.array(actions), device=device, dtype=torch.float)
-    if type(action_space) == akro.Dict:
-        actions = flatten_segs_dicts(segs, 'actions')
-        for key in actions.keys():
-            if key == 'vector':
-                pass
-            else:
-                raise ValueError(f'action key {key} unaccounted for')
-
-    return actions
-
-
 def segs_to_batch(segs, env_spec):
 
     device = global_device()
@@ -341,8 +272,8 @@ def segs_to_batch(segs, env_spec):
         rewards.append(seg.rewards)
         discounts.append(1 - seg.terminals)
 
-    actions = prepare_actions(segs, env_spec.action_space)
-    obs = prepare_observations(segs, env_spec.observation_space)
+    actions = flatten_segs_dicts(segs, attr='actions')
+    obs = flatten_segs_dicts(segs, attr='next_observations')
 
     rewards = torch.tensor(
         np.array(rewards), device=device, dtype=torch.float)

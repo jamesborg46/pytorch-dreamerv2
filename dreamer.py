@@ -93,7 +93,7 @@ class Dreamer(RLAlgorithm):
             logger.log('COLLECTING')
             start = time.time()
             eps = self._sampler.obtain_exact_episodes(
-                n_eps_per_worker=1,
+                n_eps_per_worker=get_config().samplers.agent.eps,
                 agent_update=self.agent_update()
             )
             self.buffer.collect(eps)
@@ -117,8 +117,9 @@ class Dreamer(RLAlgorithm):
                 )
                 print("train time:", time.time() - start)
 
-                if i >= get_config().world.pretrain:
-                    self.train_actor_critic_once(wm_out, self.mixed_prec)
+                self.train_actor_critic_once(wm_out, self.mixed_prec)
+                # if i >= get_config().world.pretrain:
+                #     self.train_actor_critic_once(wm_out, self.mixed_prec)
 
                 logger.log(tabular)
                 logger.dump_all(trainer.step_itr)
@@ -260,15 +261,16 @@ class Dreamer(RLAlgorithm):
         return out
 
     def _initialize_dataset(self, trainer, seed_episodes=5):
+        config = get_config()
         random_policy = RandomPolicy(self.env_spec)
         sampler_type = type(self._sampler)
         random_sampler = sampler_type(
             agents=random_policy,
             envs=trainer._env,
             max_episode_length=self.env_spec.max_episode_length,
-            n_workers=8)
+            n_workers=config.samplers.init.n)
         initial_episodes = random_sampler.obtain_exact_episodes(
-            n_eps_per_worker=seed_episodes,
+            n_eps_per_worker=config.samplers.init.eps,
             agent_update=random_policy)
         self.buffer.collect(initial_episodes)
 
