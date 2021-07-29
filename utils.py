@@ -311,5 +311,5 @@ class RandomPolicy(Policy):
         pass
 
 
-def preprocess_img(img):
-    return img / 255.
+def scale_img(img):
+    return img / 255. - 0.5

@@ -6,7 +6,7 @@ import gym
 import gym.spaces
 import numpy as np
 import cv2
-from skimage import color
+from skimage import color, img_as_ubyte
 
 from models import World
 
@@ -45,10 +45,10 @@ class Preprocess(gym.Wrapper):
 
             self._observation_space = gym.spaces.Dict({
                 'pov': gym.spaces.Box(
-                    low=-0.5,
-                    high=0.5,
+                    low=0,
+                    high=255,
                     shape=(self._color_channels, height, width),
-                    dtype=np.float32
+                    dtype=np.uint8
                 ),
             })
 
@@ -61,10 +61,10 @@ class Preprocess(gym.Wrapper):
 
             obs_space = deepcopy(obs_space)
             obs_space.spaces['pov'] = gym.spaces.Box(
-                low=-0.5,
-                high=0.5,
+                low=0,
+                high=255,
                 shape=(self._color_channels, height, width),
-                dtype=np.float32
+                dtype=np.uint8
             )
             self._observation_space = obs_space
 
@@ -85,11 +85,11 @@ class Preprocess(gym.Wrapper):
             img = self._apply_grayscale(img)
         img = self._resize_img(img)
         img = self._tranpose_img_channels(img)
-        img = self._scale_img(img)
+        # img = self._scale_img(img) # Scaling here causes memory issues
         return img
 
     def _apply_grayscale(self, img):
-        return color.rgb2gray((img))
+        return img_as_ubyte(color.rgb2gray((img)))
 
     def _resize_img(self, img):
         height, width, = img.shape[0], img.shape[1]
@@ -109,8 +109,8 @@ class Preprocess(gym.Wrapper):
         else:
             raise ValueError()
 
-    def _scale_img(self, img):
-        return img / 255 - 0.5
+    # def _scale_img(self, img):
+    #     return img / 255 - 0.5
 
     def _observation(self, obs):
         if self._world_type == World.ATARI:

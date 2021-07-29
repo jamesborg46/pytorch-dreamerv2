@@ -11,6 +11,7 @@ from torch import distributions, nn
 from torch._six import inf
 from torch.distributions import Independent, kl_divergence
 from torch.distributions.utils import logits_to_probs
+from utils import scale_img
 
 
 def categorical_kl(logits_p, logits_q):
@@ -123,6 +124,7 @@ class WorldModel(torch.nn.Module):
 
     def encode_images(self, images) -> torch.Tensor:
         ndim = images.ndim
+        images = scale_img(images)
         if ndim == 3:
             channels, height, width = images.shape
             image = images.reshape(1, channels, height, width)
@@ -298,7 +300,7 @@ class WorldModel(torch.nn.Module):
 
         recon_loss = (
             -out['recon_obs']['image_recon_dist']
-            .log_prob(observation_batch['pov']).mean()
+            .log_prob(scale_img(observation_batch['pov'])).mean()
         )
 
         if self.world_type == World.DIAMOND:
