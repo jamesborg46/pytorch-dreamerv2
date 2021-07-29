@@ -92,7 +92,7 @@ class Preprocess(gym.Wrapper):
         return color.rgb2gray((img))
 
     def _resize_img(self, img):
-        height, width, _ = img.shape
+        height, width, = img.shape[0], img.shape[1]
         if (height, width) == (self._height, self._width):
             return img  # already at the correct size
         img = cv2.resize(  # type: ignore
@@ -102,7 +102,12 @@ class Preprocess(gym.Wrapper):
 
     def _tranpose_img_channels(self, img):
         """Coverts from HWC to CHW"""
-        return np.transpose(img, (2, 0, 1))
+        if img.ndim == 2:
+            return np.expand_dims(img, 0)
+        elif img.ndim == 3:
+            return np.transpose(img, (2, 0, 1))
+        else:
+            raise ValueError()
 
     def _scale_img(self, img):
         return img / 255 - 0.5

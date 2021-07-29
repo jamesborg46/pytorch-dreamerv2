@@ -8,9 +8,23 @@ defaults:
     sampler: "ray"
     num_segs_per_batch: 50
     seg_length: 50
-    num_training_steps: 200 
-    seed_episodes: 2
+    num_training_steps: 10 
+    # seed_episodes: 2
     grad_clip: 100
+    max_episode_length: null 
+
+  samplers:
+    agent:
+      n: 4
+      eps: 1
+
+    log:
+      n: 1
+      eps: 1
+
+    init:
+      n: 4
+      eps: 1
 
   loss_scales:
     reward: 1
@@ -79,11 +93,25 @@ debug:
     seed: 42
     lr: 0.0002
     n_epochs: 100
-    sampler: "ray"
+    sampler: "local"
     num_segs_per_batch: 5
     seg_length: 20 
     num_training_steps: 3 
     seed_episodes: 2
+    max_episode_length: 150 
+
+  samplers:
+    agent:
+      n: 1
+      eps: 1
+
+    log:
+      n: 1
+      eps: 1
+
+    init:
+      n: 1
+      eps: 1
 
   rssm:
     stoch_state_classes: 16

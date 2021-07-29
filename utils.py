@@ -272,7 +272,18 @@ def segs_to_batch(segs, env_spec):
         rewards.append(seg.rewards)
         discounts.append(1 - seg.terminals)
 
-    actions = flatten_segs_dicts(segs, attr='actions')
+    if type(env_spec.action_space) == akro.Dict:
+        actions = flatten_segs_dicts(segs, attr='actions')
+    elif type(env_spec.action_space) == akro.Discrete:
+        actions = torch.tensor(
+                np.array([env_spec.action_space.flatten_n(seg.actions)
+                          for seg in segs]),
+                device=device,
+                dtype=torch.float
+            )
+    else:
+        raise ValueError()
+
     obs = flatten_segs_dicts(segs, attr='next_observations')
 
     rewards = torch.tensor(

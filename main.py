@@ -49,7 +49,7 @@ def dreamer(ctxt, gpu_id=0):
     # if CONFIG.image.color_channels == 1:
     #     env = Grayscale(env)
     # env = Resize(env, CONFIG.image.height, CONFIG.image.height)
-    env = Preprocess(env, world_type=World.ATARI)
+    env = Preprocess(env, world_type=World.ATARI, grayscale=True)
     env = Renderer(env, directory=os.path.join(snapshot_dir, 'videos'))
     env = GymEnv(env, max_episode_length=max_episode_length, is_image=True)
 
@@ -60,7 +60,8 @@ def dreamer(ctxt, gpu_id=0):
 
     trainer = Trainer(ctxt)
 
-    buf = ReplayBuffer(env.spec)
+    buf = ReplayBuffer(env.spec,
+                       segment_length=CONFIG.training.seg_length)
     world_model = WorldModel(env.spec,
                              config=CONFIG,
                              world_type=World.ATARI)
@@ -97,7 +98,6 @@ def dreamer(ctxt, gpu_id=0):
         env.spec,
         sampler=sampler,
         log_sampler=log_sampler,
-        sampler_type=Sampler,
         world_model=world_model,
         agent=agent,
         buf=buf,

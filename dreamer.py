@@ -128,16 +128,16 @@ class Dreamer(RLAlgorithm):
 
             self.agent.update_target_critic()
 
-            if i and i % self.log_vid_freq == 0:
+            # if i and i % self.log_vid_freq == 0:
 
-                eps = log_episodes(
-                    trainer.step_itr,
-                    trainer._snapshotter.snapshot_dir,
-                    sampler=self._log_sampler,
-                    agent_update=self.agent_update(),
-                    policy=self.agent,
-                    enable_render=True,
-                )
+            #     eps = log_episodes(
+            #         trainer.step_itr,
+            #         trainer._snapshotter.snapshot_dir,
+            #         sampler=self._log_sampler,
+            #         agent_update=self.agent_update(),
+            #         policy=self.agent,
+            #         enable_render=True,
+            #     )
 
                 # log_reconstructions(
                 #     eps,
@@ -273,6 +273,12 @@ class Dreamer(RLAlgorithm):
             n_eps_per_worker=config.samplers.init.eps,
             agent_update=random_policy)
         self.buffer.collect(initial_episodes)
+
+        if sampler_type == RaySampler:
+            for worker in random_sampler._all_workers.values():
+                worker.shutdown.remote()
+
+        del random_sampler
 
     # def _dynamics_learning(self):
     #     pass

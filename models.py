@@ -67,7 +67,8 @@ class WorldModel(torch.nn.Module):
 
         obs_space = env_spec.observation_space
         if world_type == World.ATARI:
-            assert type(obs_space) == akro.Image
+            assert type(obs_space) == akro.Dict and \
+                obs_space.spaces.keys() == set(['pov'])
         elif world_type == World.DIAMOND:
             assert type(obs_space) == akro.Dict and \
                 obs_space.spaces.keys() == set(['pov', 'vector'])
@@ -84,7 +85,7 @@ class WorldModel(torch.nn.Module):
         else:
             raise ValueError()
 
-        self.rssm = RSSM(env_spec, config=self.config)
+        self.rssm = RSSM(env_spec, config=self.config, world_type=world_type)
 
         self.image_encoder = ImageEncoder(config=self.config)
         self.image_decoder = ImageDecoder(config=self.config)
@@ -353,7 +354,7 @@ class ActorCritic(Policy):
 
         obs_space = env_spec.observation_space
         if world_type == World.ATARI:
-            assert type(obs_space) == akro.Image and \
+            assert type(obs_space) == akro.Dict and \
                 type(env_spec.action_space) == akro.Discrete
             self.action_size = env_spec.action_space.n
             actor_dist = 'onehot'
@@ -532,7 +533,8 @@ class RSSM(torch.nn.Module):
 
     def __init__(self,
                  env_spec,
-                 config,):
+                 config,
+                 world_type: World = World.DIAMOND):
         super().__init__()
         self._env_spec = env_spec
         self.config = config
@@ -545,11 +547,12 @@ class RSSM(torch.nn.Module):
             raise ValueError()
 
         obs_space = env_spec.observation_space
-        if type(obs_space) == akro.Image:
+        if world_type == World.ATARI:
             self.embed_size = self.config.image_encoder.N * 32
-        elif type(obs_space) == akro.Dict and \
-                obs_space.spaces.keys() == set(['pov', 'vector']):
+        elif world_type == World.DIAMOND:
             self.embed_size = self.config.image_encoder.N * 32 + 64
+        elif world_type == World.BASALT:
+            raise NotImplementedError()
         else:
             raise ValueError()
 
