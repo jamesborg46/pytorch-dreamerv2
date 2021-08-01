@@ -345,6 +345,7 @@ class ActorCritic(Policy):
         super().__init__(env_spec=env_spec, name='ActorCritic')
         self.world_model = world_model
         self.config = config
+        self.n_envs = n_envs
         self.random = random
         self.world_type = world_type
 
@@ -396,8 +397,11 @@ class ActorCritic(Policy):
             dist='mse'
         )
 
-        self.initial_state = self.world_model.rssm.initial_state(n_envs)
-        self.deter = self.initial_state['deter']
+        self.deter = None  # initialised in self.reset()
+
+    @property
+    def initial_state(self):
+        return self.world_model.rssm.initial_state(self.n_envs)
 
     def pack_action(self, action):
         if self.world_type == World.ATARI:

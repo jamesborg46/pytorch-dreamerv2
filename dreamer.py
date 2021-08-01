@@ -85,9 +85,7 @@ class Dreamer(RLAlgorithm):
         """
 
         logger.log('INITIALIZING')
-        self._initialize_dataset(
-            trainer,
-            seed_episodes=get_config().training.seed_episodes)
+        self._initialize_dataset(trainer,)
 
         for i in trainer.step_epochs():
             logger.log('COLLECTING')
@@ -117,9 +115,8 @@ class Dreamer(RLAlgorithm):
                 )
                 print("train time:", time.time() - start)
 
-                self.train_actor_critic_once(wm_out, self.mixed_prec)
-                # if i >= get_config().world.pretrain:
-                #     self.train_actor_critic_once(wm_out, self.mixed_prec)
+                if i >= get_config().world.pretrain:
+                    self.train_actor_critic_once(wm_out, self.mixed_prec)
 
                 logger.log(tabular)
                 logger.dump_all(trainer.step_itr)
@@ -260,7 +257,7 @@ class Dreamer(RLAlgorithm):
 
         return out
 
-    def _initialize_dataset(self, trainer, seed_episodes=5):
+    def _initialize_dataset(self, trainer):
         config = get_config()
         random_policy = RandomPolicy(self.env_spec)
         sampler_type = type(self._sampler)

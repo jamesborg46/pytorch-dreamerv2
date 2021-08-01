@@ -15,7 +15,7 @@ defaults:
 
   samplers:
     agent:
-      n: 4
+      n: 1
       eps: 1
 
     log:
@@ -23,7 +23,7 @@ defaults:
       eps: 1
 
     init:
-      n: 4
+      n: 1
       eps: 1
 
   loss_scales:

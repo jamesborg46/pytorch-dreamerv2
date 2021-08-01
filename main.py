@@ -81,7 +81,7 @@ def dreamer(ctxt, gpu_id=0):
         max_episode_length=max_episode_length,
         n_workers=CONFIG.samplers.agent.n)
 
-    log_sampler = Sampler(  # noqa: F841
+    log_sampler = LocalSampler(  # noqa: F841
         agents=agent,
         envs=env,
         max_episode_length=max_episode_length,
