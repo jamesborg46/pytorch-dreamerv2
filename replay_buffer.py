@@ -17,17 +17,22 @@ def slice_from_episode(episode, start, end):
             [next_observations, episode.last_observations],
             axis=0)
 
-    sliced = TimeStepBatch(
-        env_spec=episode.env_spec,
-        episode_infos=slice_nested_dict(episode.agent_infos, 0, 1),
-        observations=episode.observations[start:end],
-        actions=episode.actions[start:end],
-        rewards=episode.rewards[start:end],
-        next_observations=next_observations,
-        env_infos=slice_nested_dict(episode.env_infos, start, end),
-        agent_infos=slice_nested_dict(episode.agent_infos, start, end),
-        step_types=episode.step_types[start:end],
-    )
+    try:
+        sliced = TimeStepBatch(
+            env_spec=episode.env_spec,
+            episode_infos=slice_nested_dict(episode.agent_infos, 0, 1),
+            observations=episode.observations[start:end],
+            actions=episode.actions[start:end],
+            rewards=episode.rewards[start:end],
+            next_observations=next_observations,
+            env_infos=slice_nested_dict(episode.env_infos, start, end),
+            agent_infos=slice_nested_dict(episode.agent_infos, start, end),
+            step_types=episode.step_types[start:end],
+        )
+    except AttributeError as e:
+        print(e)
+        breakpoint()
+
     return sliced
 
 

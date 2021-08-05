@@ -1,7 +1,7 @@
 import os.path as osp
 import time
 from contextlib import nullcontext
-from typing import Union
+from typing import Union, Optional
 
 import models
 import numpy as np
@@ -15,8 +15,9 @@ from garage.torch import global_device
 from torch import optim
 from torch.cuda.amp import autocast
 from tqdm import tqdm
-from utils import (RandomPolicy, get_config, log_episodes,
-                   log_imagined_rollouts, log_reconstructions, segs_to_batch)
+import utils
+from utils import (RandomPolicy, get_config, log_action_dist_plots, segs_to_batch, log_eps_video,
+                   log_reconstructions)
 
 scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -30,6 +31,7 @@ class Dreamer(RLAlgorithm):
                  world_model: models.WorldModel,
                  agent: models.ActorCritic,
                  buf: replay_buffer.ReplayBuffer,
+                 human_buf: Optional[replay_buffer.ReplayBuffer],
                  mixed_prec: bool,
                  ):
 
@@ -40,9 +42,11 @@ class Dreamer(RLAlgorithm):
         self.world_model = world_model.to(device)
         self.agent = agent.to(device)
         self.buffer = buf
+        self.human_buf = human_buf
         self.mixed_prec = mixed_prec
+        self.human_portion = get_config().buffer.human_portion
 
-        self.log_vid_freq = get_config().logging.log_vid_freq
+        self.log_freq = get_config().logging.log_freq
         self._num_segs_per_batch = get_config().training.num_segs_per_batch
         self._num_training_steps = get_config().training.num_training_steps
 
@@ -64,12 +68,27 @@ class Dreamer(RLAlgorithm):
             eps=get_config().critic.eps,
             weight_decay=get_config().critic.wd)
 
+        if human_buf is not None:
+            self.example_human_actions = utils.get_human_actions(human_buf)
+
     def agent_update(self):
         sampler_type = type(self._sampler)
         if sampler_type == RaySampler:
             return {k: v.cpu() for k, v in self.agent.state_dict().items()}
         elif sampler_type == LocalSampler:
             return {k: v for k, v in self.agent.state_dict().items()}
+
+    def sample_segments(self):
+        if get_config().buffer.shared_buffer:
+            n = int(self._num_segs_per_batch * self.human_portion)
+            k = self._num_segs_per_batch - n
+            human_segs = self.human_buf.sample_segments(n=n)
+            policy_segs = self.buffer.sample_segments(n=k)
+            segs = human_segs + policy_segs
+        else:
+            segs = self.buffer.sample_segments(n=self._num_segs_per_batch)
+        return segs
+
 
     def train(self, trainer):
         """Obtain samplers and start actual training for each epoch.
@@ -85,7 +104,7 @@ class Dreamer(RLAlgorithm):
         """
 
         logger.log('INITIALIZING')
-        self._initialize_dataset(trainer,)
+        self._initialize_dataset(trainer)
 
         for i in trainer.step_epochs():
             logger.log('COLLECTING')
@@ -105,8 +124,7 @@ class Dreamer(RLAlgorithm):
 
             logger.log('TRAINING')
             for j in tqdm(range(self._num_training_steps)):
-                segs = self.buffer.sample_segments(
-                    n=self._num_segs_per_batch)
+                segs = self.sample_segments()
                 obs, actions, rewards, discounts = segs_to_batch(
                     segs, self.env_spec)
                 start = time.time()
@@ -125,32 +143,32 @@ class Dreamer(RLAlgorithm):
 
             self.agent.update_target_critic()
 
-            # if i and i % self.log_vid_freq == 0:
+            if i and i % self.log_freq == 0:
+                with torch.no_grad():
+                    video_dir = osp.join(trainer._snapshotter.snapshot_dir,
+                                         'videos')
+                    logger.log('LOGGING')
+                    start = time.time()
 
-            #     eps = log_episodes(
-            #         trainer.step_itr,
-            #         trainer._snapshotter.snapshot_dir,
-            #         sampler=self._log_sampler,
-            #         agent_update=self.agent_update(),
-            #         policy=self.agent,
-            #         enable_render=True,
-            #     )
+                    log_eps_video(
+                        eps=eps,
+                        log_dir=video_dir,
+                        itr=trainer.step_itr
+                    )
 
-                # log_reconstructions(
-                #     eps,
-                #     self.env_spec,
-                #     self.world_model,
-                #     trainer.step_itr,
-                #     path=osp.join(trainer._snapshotter.snapshot_dir, 'videos')
-                # )
+                    log_reconstructions(obs,
+                                        wm_out,
+                                        log_dir=video_dir,
+                                        itr=trainer.step_itr)
 
-                # log_imagined_rollouts(
-                #     eps,
-                #     self.env_spec,
-                #     self.world_model,
-                #     trainer.step_itr,
-                #     path=osp.join(trainer._snapshotter.snapshot_dir, 'videos')
-                # )
+                    if self.human_buf is not None:
+                        policy_actions = utils.get_policy_actions(eps)
+                        log_action_dist_plots(self.example_human_actions,
+                                              policy_actions,
+                                              itr=trainer.step_itr)
+
+                    logger.log(f"LOG TIME: {time.time() - start}")
+
 
     def train_actor_critic_once(self, wm_out, mixed_prec=True):
 
@@ -201,7 +219,7 @@ class Dreamer(RLAlgorithm):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-        with tabular.prefix('actor_critic_'):
+        with tabular.prefix('actor_critic/'):
             tabular.record('actor_loss', actor_loss.cpu().item())
             tabular.record('actor_entropy', actor_entropy.mean().cpu().item())
             tabular.record('critic_loss', critic_loss.cpu().item())
@@ -251,7 +269,7 @@ class Dreamer(RLAlgorithm):
         else:
             self.world_optimizer.step()
 
-        with tabular.prefix('world_model_'):
+        with tabular.prefix('world_model/'):
             for k, v in loss_info.items():
                 tabular.record(k, v.cpu().item())
 

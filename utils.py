@@ -1,25 +1,25 @@
 import collections.abc
-import json
-import math
 import os
 import os.path as osp
-from typing import Union
+from collections import OrderedDict
+import pickle
 
 import akro
-import gym
+from dowel import logger
 import numpy as np
-import ray
 import torch
 from dotmap import DotMap
-from garage import EnvSpec
-from garage.sampler.env_update import EnvUpdate
+from garage import EnvSpec, EpisodeBatch, StepType
 from garage.torch import global_device
 from garage.torch.policies import Policy
-from garage.torch.policies.stochastic_policy import StochasticPolicy
+import minerl
+import minerl.data
 from ruamel.yaml import YAML
+import plotly.graph_objects as go
 from video import export_video
 
 import wandb
+from replay_buffer import ReplayBuffer
 
 
 def update(d, u):
@@ -29,6 +29,7 @@ def update(d, u):
         else:
             d[k] = v
     return d
+
 
 def set_config(config_type='defaults'):
     """Set GPU mode and device ID.
@@ -50,189 +51,101 @@ def set_config(config_type='defaults'):
             assert config_type in base.keys()
             _CONFIG = update(base.defaults, base[config_type])
 
+
 def get_config():
     global _CONFIG
     return _CONFIG
 
 
-class EnvConfigUpdate(EnvUpdate):
+def log_eps_video(eps, log_dir, itr):
+    obs = np.array([o['pov'] for o in eps.observations])
+    obs = np.transpose(obs, (0, 2, 3, 1))
 
-    def __init__(self,
-                 enable_render=False,
-                 file_prefix=""):
+    if not osp.exists(log_dir):
+        os.makedirs(log_dir)
 
-        self.enable_render = enable_render
-        self.file_prefix = file_prefix
+    fname = osp.join(log_dir, f'eps_{itr}.mp4')
 
-    def __call__(self, old_env):
-        old_env.enable_rendering(self.enable_render,
-                                 file_prefix=self.file_prefix)
-        return old_env
-
-
-class CloseRenderer(EnvUpdate):
-
-    def __call__(self, old_env):
-        old_env.close_renderer()
-        return old_env
-
-
-def log_episodes(itr,
-                 snapshot_dir,
-                 sampler,
-                 policy,
-                 agent_update,
-                 enable_render=False,
-                 ):
-
-    CONFIG = get_config()
-
-    if hasattr(sampler, '_worker_factory'):
-        n_workers = sampler._worker_factory.n_workers
-    else:
-        n_workers = sampler._factory.n_workers
-
-    env_updates = []
-
-    for i in range(n_workers):
-        env_updates.append(EnvConfigUpdate(
-            enable_render=enable_render,
-            file_prefix=f"epoch_{itr:04}_worker_{i:02}"
-        ))
-
-    sampler._update_workers(
-        env_update=env_updates,
-        agent_update=agent_update,
+    export_video(
+        frames=obs[:, ::-1],
+        fname=fname,
+        fps=20
     )
 
-    episodes = sampler.obtain_exact_episodes(
-        n_eps_per_worker=CONFIG.samplers.log.eps,
-        agent_update=agent_update,
+    wandb.log({
+        os.path.basename(fname): wandb.Video(fname),
+    }, step=itr)
+
+
+def log_reconstructions(obs, wm_out, log_dir, itr, n=3):
+
+    org_img = np.transpose(
+        obs['pov'].cpu().numpy().astype(np.uint8),
+        (0, 1, 3, 4, 2)
     )
 
-    if enable_render:
-        env_updates = [CloseRenderer() for _ in range(n_workers)]
+    recon_img = np.transpose(
+        np.clip(
+            unscale_img(wm_out['recon_obs']['image_recon_dist'].mean)
+            .cpu().numpy().astype(np.uint8), 0, 255
+        ),
+        (0, 1, 3, 4, 2)
+    )
 
-        updates = sampler._update_workers(
-            env_update=env_updates,
-            agent_update=agent_update,
+    side_by_side = np.concatenate([org_img, recon_img], axis=3)
+
+    for i in np.random.choice(range(len(side_by_side)), size=n, replace=False):
+        fname = osp.join(log_dir, f'reconstructed_{itr}_{i}.mp4')
+
+        export_video(
+            frames=side_by_side[i, :, ::-1],
+            fname=fname,
+            fps=10
         )
 
-        while updates:
-            ready, updates = ray.wait(updates)
-
-    if enable_render:
-        for episode in episodes.split():
-            video_file = episode.env_infos['video_filename'][0]
-            assert '.mp4' in video_file
-            wandb.log({
-                os.path.basename(video_file): wandb.Video(video_file),
-            }, step=itr)
-
-    return episodes
+        wandb.log({
+            os.path.basename(fname): wandb.Video(fname),
+        }, step=itr)
 
 
-def log_imagined_rollouts(eps,
-                          env_spec,
-                          world_model,
-                          itr,
-                          path):
+def log_action_dist_plots(human_actions, policy_actions, itr):
+    for i in range(8):
+        fig = go.Figure()  # type: ignore
 
-    with torch.no_grad():
-        for i, ep in enumerate(eps.split()):
-            obs = (torch.tensor(eps.observations).type(torch.float)
-                   .unsqueeze(1)).to(global_device()) / 255 - 0.5
-            actions = (torch.tensor(env_spec.action_space.flatten_n(eps.actions))
-                       .type(torch.float)).to(global_device())
-            steps, channels, height, width = obs.shape
-            embedded_observations = world_model.image_encoder(obs[:5])
-
-            # Run first five steps with observations
-            out = world_model.observe(embedded_observations[:5].unsqueeze(0),
-                                      actions[:5].unsqueeze(0))
-            recon_latent_states = out['latent_states'].reshape(
-                5, world_model.latent_state_size)
-
-            initial_stoch = out['posterior_samples'][:1, -1]
-            inital_deter = out['deters'][:1, -1]
-            _, imagined_latent_states, _, _ = (
-                world_model.imagine(initial_stoch, inital_deter,
-                                    actions=actions[5:].unsqueeze(1))
+        fig.add_trace(
+            go.Violin(  # type: ignore
+                x=np.repeat(np.arange(i*8, i*8+8).reshape(-1, 1),
+                            human_actions.shape[1],
+                            axis=1).flatten(),
+                y=human_actions[i*8: i*8+8].flatten(),
+                legendgroup='Human',
+                scalegroup='Human',
+                name='Human',
+                side='negative',
+                line_color='blue',
             )
-            imagined_latent_states = imagined_latent_states.reshape(
-                -1, world_model.latent_state_size)
-            latent_states = torch.cat(
-                [recon_latent_states, imagined_latent_states], dim=0)
+        )
 
-            image_recon = world_model.image_decoder(latent_states).reshape(
-                steps, channels, height, width).cpu().numpy()
-
-            image_recon = np.transpose(image_recon, (0, 2, 3, 1))
-            original_obs = np.transpose(obs.cpu().numpy(), (0, 2, 3, 1))
-
-            if original_obs.shape[-1] == 1:
-                image_recon = np.tile(image_recon, (1, 1, 1, 3))
-                original_obs = np.tile(original_obs, (1, 1, 1, 3))
-
-            original_obs = (original_obs + 0.5) * 255
-            image_recon = np.clip((image_recon + 0.5) * 255, 0, 255)
-            original_obs = original_obs.astype(np.uint8)
-            image_recon = image_recon.astype(np.uint8)
-
-            side_by_side = np.concatenate([original_obs, image_recon], axis=2)
-
-            fname = osp.join(path, f'imagined_{itr}_{i}.mp4')
-            export_video(
-                frames=side_by_side[:, ::-1],
-                fname=fname,
-                fps=10
+        fig.add_trace(
+            go.Violin(  # type: ignore
+                x=np.repeat(np.arange(i*8, i*8+8).reshape(-1, 1),
+                            policy_actions.shape[1],
+                            axis=1).flatten(),
+                y=policy_actions[i*8: i*8+8].flatten(),
+                legendgroup='Policy',
+                scalegroup='Policy',
+                name='Policy',
+                side='positive',
+                line_color='orange',
             )
+        )
 
-            wandb.log({
-                os.path.basename(fname): wandb.Video(fname),
-            }, step=itr)
+        fig.update_traces(meanline_visible=True)
+        fig.update_layout(violingap=0, violinmode='overlay', title='blah')
 
-
-def log_reconstructions(eps,
-                        env_spec,
-                        world_model,
-                        itr,
-                        path):
-
-    with torch.no_grad():
-        lengths = eps.lengths
-        obs = (torch.tensor(eps.observations).type(torch.float)
-               .unsqueeze(1)).to(global_device()) / 255 - 0.5
-        actions = (torch.tensor(env_spec.action_space.flatten_n(eps.actions))
-                   .type(torch.float)).to(global_device())
-
-        image_recon = world_model.reconstruct(obs, actions).cpu().numpy()
-        image_recon = np.transpose(image_recon, (0, 2, 3, 1))
-        original_obs = np.transpose(obs.cpu().numpy(), (0, 2, 3, 1))
-
-        if original_obs.shape[-1] == 1:
-            image_recon = np.tile(image_recon, (1, 1, 1, 3))
-            original_obs = np.tile(original_obs, (1, 1, 1, 3))
-
-        original_obs = (original_obs + 0.5) * 255
-        image_recon = np.clip((image_recon + 0.5) * 255, 0, 255)
-        original_obs = original_obs.astype(np.uint8)
-        image_recon = image_recon.astype(np.uint8)
-
-        side_by_side = np.concatenate([original_obs, image_recon], axis=2)
-        start = 0
-        for i, length in enumerate(lengths):
-            fname = osp.join(path, f'reconstructed_{itr}_{i}.mp4')
-            export_video(
-                frames=side_by_side[start:start+length, ::-1],
-                fname=fname,
-                fps=10
-            )
-            start += length
-
-            wandb.log({
-                os.path.basename(fname): wandb.Video(fname),
-            }, step=itr)
+        wandb.log({
+            f"action_dists_{itr}_{i}": fig,
+        }, step=itr)
 
 
 def flatten_segs_dicts(segs, attr, dtype=torch.float):
@@ -295,6 +208,74 @@ def segs_to_batch(segs, env_spec):
     return obs, actions, rewards, discounts
 
 
+def unflatten(x):
+    k = next(iter(x))
+    return np.array([OrderedDict({k: v[i] for k, v in x.items()})
+                     for i in range(len(x[k]))])
+
+
+# MineRL Seq to garage episode
+def minerl_seq_to_ep(seq, spec):
+    obs, action, rew, next_obs, done = seq
+    obs['pov'] = np.transpose(obs['pov'], (0, 3, 1, 2)).copy()
+    next_obs['pov'] = np.transpose(next_obs['pov'], (0, 3, 1, 2)).copy()
+    length = len(done)
+    step_types = np.array([StepType.FIRST] +
+                          ([StepType.MID] * (length-2)) +
+                          [StepType.TERMINAL], dtype=StepType)
+    ep = EpisodeBatch(
+        env_spec=spec,
+        episode_infos={},
+        observations=unflatten(obs),
+        last_observations=np.array([unflatten(next_obs)[-1]]),
+        actions=unflatten(action),
+        rewards=rew,
+        env_infos={},
+        agent_infos={},
+        step_types=step_types,
+        lengths=np.array([length])
+    )
+    return ep
+
+
+def load_human_data_buffer(env_name: str, spec: EnvSpec):
+    data_root = os.environ.get('MINERL_DATA_ROOT')
+    buffer_path = osp.join(data_root, env_name, "buffer.pkl")  # type: ignore
+    if osp.exists(buffer_path):
+        logger.log('Loading existing human dataset buffer')
+        with open(buffer_path, 'rb') as f:
+            buf = pickle.load(f)
+        return buf
+    else:
+        logger.log('No human dataset buffer found')
+        logger.log('Creating human dataset buffer...')
+        data = minerl.data.make(env_name)
+        buf = ReplayBuffer(spec, segment_length=get_config().training.seg_length)
+        trajectories = data.get_trajectory_names()
+
+        for traj in trajectories:
+            path = osp.join(data_root, env_name, traj)  # type: ignore
+            seq = data._load_data_pyfunc(path, -1, None)
+            buf.collect(minerl_seq_to_ep(seq, spec))
+
+        logger.log('Saving human dataset buffer...')
+        with open(buffer_path, 'wb') as f:
+            pickle.dump(buf, f)
+
+        return buf
+
+
+def get_human_actions(human_buffer: ReplayBuffer, n=10000):
+    human_actions = np.array(
+        [act['vector'] for act in human_buffer.episodes.actions])
+    i = np.random.choice(len(human_actions), size=n, replace=False, p=None)
+    human_actions = human_actions[i].T
+    return human_actions
+
+
+def get_policy_actions(eps: EpisodeBatch):
+    return np.array([act['vector'] for act in eps.actions]).T
+
 class RandomPolicy(Policy):
 
     def __init__(self, env_spec: EnvSpec):
@@ -313,3 +294,7 @@ class RandomPolicy(Policy):
 
 def scale_img(img):
     return img / 255. - 0.5
+
+
+def unscale_img(img):
+    return (img + 0.5) * 255

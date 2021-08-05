@@ -76,10 +76,9 @@ class WorldModel(torch.nn.Module):
 
             self.obs_vector_decoder = MLP(
                 input_shape=self.latent_state_size,
-                units=[128, ],
+                units=[256, 128],
                 out_shape=64,
-                dist='mse',
-                scale=0.1)
+                dist='gaussian')
 
         elif world_type == World.BASALT:
             raise NotImplementedError()
@@ -294,6 +293,7 @@ class WorldModel(torch.nn.Module):
         return latent_state
 
     def loss(self, out, observation_batch, reward_batch, discount_batch):
+        loss_info = dict()
         kl_loss = out['kl_losses'].mean()
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
@@ -305,10 +305,15 @@ class WorldModel(torch.nn.Module):
 
         if self.world_type == World.DIAMOND:
             vector_scale = self.config.loss_scales.recon_vector
-            recon_loss += (
+            image_recon_loss = recon_loss
+            vector_recon_loss = (
                 vector_scale * -out['recon_obs']['vector_recon_dist']
                 .log_prob(observation_batch['vector']).mean()
             )
+            recon_loss = image_recon_loss + vector_recon_loss
+
+            loss_info['image_recon_loss'] = image_recon_loss
+            loss_info['vector_recon_loss'] = vector_recon_loss
 
         reward_mae = torch.abs(out['reward_dist'].mean - reward_batch).mean()
         discount_mae = torch.abs(out['discount_dist'].mean
@@ -321,7 +326,7 @@ class WorldModel(torch.nn.Module):
             self.config.loss_scales.kl * kl_loss
         )
 
-        loss_info = {
+        loss_info.update({
             'kl_loss': kl_loss,
             'reward_loss': reward_loss,
             'discount_loss': discount_loss,
@@ -329,7 +334,7 @@ class WorldModel(torch.nn.Module):
             'total_loss': loss,
             'reward_mae': reward_mae,
             'discount_mae': discount_mae,
-        }
+        })
         return loss, loss_info
 
 
@@ -721,12 +726,17 @@ class MLP(torch.nn.Module):
         self.dist = dist
         self.scale = scale
         self.ind_dims = ind_dims
+        self.out_shape = out_shape
 
         self.net = nn.Sequential()
         for i, unit in enumerate(units):
             self.net.add_module(f"linear_{i}", nn.Linear(input_shape, unit))
             self.net.add_module(f"activation_{i}", Activation())
             input_shape = unit
+
+        if dist == 'gaussian':
+            out_shape *= 2
+
         self.net.add_module("out_layer", nn.Linear(input_shape, out_shape))
 
     def forward(self, features):
@@ -738,6 +748,10 @@ class MLP(torch.nn.Module):
         elif self.dist == 'onehot':
             dist = torch.distributions.OneHotCategoricalStraightThrough(
                 logits=logits)
+        elif self.dist == 'gaussian':
+            mean = logits[..., :self.out_shape]
+            std = torch.log(1 + torch.exp(logits[..., self.out_shape:]))
+            dist = torch.distributions.Normal(loc=mean, scale=std)
         else:
             raise ValueError()
 

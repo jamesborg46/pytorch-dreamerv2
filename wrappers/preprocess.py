@@ -57,7 +57,7 @@ class Preprocess(gym.Wrapper):
             assert isinstance(obs_space['pov'], gym.spaces.Box)
             assert (obs_space['pov'].low == 0).all() and \
                 (obs_space['pov'].high == 255).all()
-            assert obs_space['pov'].shape == (64, 64, 3)
+            assert obs_space['pov'].shape == (64, 64, 3), f"{obs_space['pov'].shape}"
 
             obs_space = deepcopy(obs_space)
             obs_space.spaces['pov'] = gym.spaces.Box(
