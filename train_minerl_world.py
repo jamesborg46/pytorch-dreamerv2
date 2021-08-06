@@ -24,7 +24,7 @@ import numpy as np
 scaler = torch.cuda.amp.GradScaler(enabled=True)
 
 
-MINERL_DATASET = '/data/umihebi0/users/james/MineRL'
+MINERL_DATASET = os.environ['MINERL_DATA_ROOT']
 ENV_SPEC = minerl.data.make('MineRLTreechop-v0', data_dir=MINERL_DATASET)._env_spec
 
 
