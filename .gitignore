@@ -4,3 +4,4 @@ snapshot_dir/
 wandb/
 experiment/
 videos/
+*.pickle

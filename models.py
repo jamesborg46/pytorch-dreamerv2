@@ -76,7 +76,7 @@ class WorldModel(torch.nn.Module):
 
             self.obs_vector_decoder = MLP(
                 input_shape=self.latent_state_size,
-                units=[256, 128],
+                units=[400, 400, 400],
                 out_shape=64,
                 dist='gaussian')
 

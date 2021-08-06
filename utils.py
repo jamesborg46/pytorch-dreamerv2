@@ -79,6 +79,9 @@ def log_eps_video(eps, log_dir, itr):
 
 def log_reconstructions(obs, wm_out, log_dir, itr, n=3):
 
+    if not osp.exists(log_dir):
+        os.makedirs(log_dir)
+
     org_img = np.transpose(
         obs['pov'].cpu().numpy().astype(np.uint8),
         (0, 1, 3, 4, 2)
@@ -87,8 +90,8 @@ def log_reconstructions(obs, wm_out, log_dir, itr, n=3):
     recon_img = np.transpose(
         np.clip(
             unscale_img(wm_out['recon_obs']['image_recon_dist'].mean)
-            .cpu().numpy().astype(np.uint8), 0, 255
-        ),
+            .cpu().numpy(), 0, 255
+        ).astype(np.uint8),
         (0, 1, 3, 4, 2)
     )
 
@@ -223,13 +226,15 @@ def minerl_seq_to_ep(seq, spec):
     step_types = np.array([StepType.FIRST] +
                           ([StepType.MID] * (length-2)) +
                           [StepType.TERMINAL], dtype=StepType)
+
+    human_reward_bias = get_config().buffer.human_reward_bias
     ep = EpisodeBatch(
         env_spec=spec,
         episode_infos={},
         observations=unflatten(obs),
         last_observations=np.array([unflatten(next_obs)[-1]]),
         actions=unflatten(action),
-        rewards=rew,
+        rewards=rew + human_reward_bias,
         env_infos={},
         agent_infos={},
         step_types=step_types,
@@ -241,7 +246,9 @@ def minerl_seq_to_ep(seq, spec):
 def load_human_data_buffer(env_name: str, spec: EnvSpec):
     data_root = os.environ.get('MINERL_DATA_ROOT')
     buffer_path = osp.join(data_root, env_name, "buffer.pkl")  # type: ignore
-    if osp.exists(buffer_path):
+    human_reward_bias = get_config().buffer.human_reward_bias
+
+    if osp.exists(buffer_path) and human_reward_bias == 0:
         logger.log('Loading existing human dataset buffer')
         with open(buffer_path, 'rb') as f:
             buf = pickle.load(f)

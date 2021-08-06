@@ -141,7 +141,8 @@ class Dreamer(RLAlgorithm):
                 tabular.clear()
                 trainer.step_itr += 1
 
-            self.agent.update_target_critic()
+                if j and j % get_config().training.target_update_freq == 0:
+                    self.agent.update_target_critic()
 
             if i and i % self.log_freq == 0:
                 with torch.no_grad():
