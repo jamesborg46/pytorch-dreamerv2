@@ -89,7 +89,6 @@ class Dreamer(RLAlgorithm):
             segs = self.buffer.sample_segments(n=self._num_segs_per_batch)
         return segs
 
-
     def train(self, trainer):
         """Obtain samplers and start actual training for each epoch.
 
@@ -104,7 +103,9 @@ class Dreamer(RLAlgorithm):
         """
 
         logger.log('INITIALIZING')
+
         self._initialize_dataset(trainer)
+        self._pretrain()
 
         for i in trainer.step_epochs():
             logger.log('COLLECTING')
@@ -133,8 +134,7 @@ class Dreamer(RLAlgorithm):
                 )
                 print("train time:", time.time() - start)
 
-                if i >= get_config().world.pretrain:
-                    self.train_actor_critic_once(wm_out, self.mixed_prec)
+                self.train_actor_critic_once(wm_out, self.mixed_prec)
 
                 logger.log(tabular)
                 logger.dump_all(trainer.step_itr)
@@ -277,24 +277,32 @@ class Dreamer(RLAlgorithm):
         return out
 
     def _initialize_dataset(self, trainer):
-        config = get_config()
-        random_policy = RandomPolicy(self.env_spec)
-        sampler_type = type(self._sampler)
-        random_sampler = sampler_type(
-            agents=random_policy,
-            envs=trainer._env,
-            max_episode_length=self.env_spec.max_episode_length,
-            n_workers=config.samplers.init.n)
-        initial_episodes = random_sampler.obtain_exact_episodes(
-            n_eps_per_worker=config.samplers.init.eps,
-            agent_update=random_policy)
+        initial_episodes = self._sampler.obtain_exact_episodes(
+            n_eps_per_worker=get_config().samplers.init.eps,
+            agent_update=self.agent_update()
+        )
+
+        # config = get_config()
+        # random_policy = RandomPolicy(self.env_spec)
+        # sampler_type = type(self._sampler)
+        # random_sampler = sampler_type(
+        #     agents=random_policy,
+        #     envs=trainer._env,
+        #     max_episode_length=self.env_spec.max_episode_length,
+        #     n_workers=config.samplers.init.n)
+        #
+
         self.buffer.collect(initial_episodes)
 
-        if sampler_type == RaySampler:
-            for worker in random_sampler._all_workers.values():
-                worker.shutdown.remote()
-
-        del random_sampler
+    def _pretrain(self):
+        logger.log('PRE TRAINING')
+        for j in tqdm(range(get_config().world.pretrain_steps)):
+            segs = self.sample_segments()
+            obs, actions, rewards, discounts = segs_to_batch(
+                segs, self.env_spec)
+            self.train_world_model_once(
+                obs, actions, rewards, discounts, self.mixed_prec
+            )
 
     # def _dynamics_learning(self):
     #     pass

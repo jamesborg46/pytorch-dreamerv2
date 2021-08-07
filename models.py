@@ -7,6 +7,7 @@ import torch
 from dowel import logger
 from garage.torch import global_device
 from garage.torch.policies import Policy
+import numpy as np
 from torch import distributions, nn
 from torch._six import inf
 from torch.distributions import Independent, kl_divergence
@@ -373,9 +374,9 @@ class ActorCritic(Policy):
             assert type(obs_space) == akro.Dict and \
                 type(env_spec.action_space) == akro.Dict
             self.action_size = env_spec.action_space.flat_dim
-            actor_dist = 'mse'
+            actor_dist = 'gaussian'
             ind_dims = 1
-            scale = 0.1
+            scale = None
 
         elif world_type == World.BASALT:
             raise NotImplementedError()
@@ -412,7 +413,9 @@ class ActorCritic(Policy):
         if self.world_type == World.ATARI:
             return torch.argmax(action, dim=-1).item()
         elif self.world_type == World.DIAMOND:
-            return {'vector': action.cpu().numpy()}
+            return {'vector': np.clip(action.cpu().numpy(),
+                                      a_min=-1.05,
+                                      a_max=1.05)}
         elif self.world_type == World.BASALT:
             raise NotImplementedError()
         else:
@@ -760,3 +763,10 @@ class MLP(torch.nn.Module):
                 dist, reinterpreted_batch_ndims=self.ind_dims)
 
         return dist
+
+    def initialize_mean_std(self, mean, std):
+        rho = torch.log(torch.exp(torch.tensor(std, dtype=torch.float32)) - 1)
+        mean = torch.tensor(mean, dtype=torch.float32)
+        init = torch.cat([mean, rho])
+        with torch.no_grad():
+            self.net.out_layer.bias.data = torch.nn.Parameter(init)

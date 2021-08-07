@@ -280,6 +280,14 @@ def get_human_actions(human_buffer: ReplayBuffer, n=10000):
     return human_actions
 
 
+def get_actions_mean_and_std(human_buffer: ReplayBuffer):
+    human_actions = np.array(
+        [act['vector'] for act in human_buffer.episodes.actions])
+    mean = human_actions.mean(axis=0)
+    std = human_actions.std(axis=0)
+    return mean, std
+
+
 def get_policy_actions(eps: EpisodeBatch):
     return np.array([act['vector'] for act in eps.actions]).T
 
