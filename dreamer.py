@@ -31,8 +31,8 @@ class Dreamer(RLAlgorithm):
                  world_model: models.WorldModel,
                  agent: models.ActorCritic,
                  buf: replay_buffer.ReplayBuffer,
-                 human_buf: Optional[replay_buffer.ReplayBuffer],
-                 mixed_prec: bool,
+                 human_buf: Optional[replay_buffer.ReplayBuffer] = None,
+                 mixed_prec: bool = True,
                  ):
 
         device = global_device()
