@@ -535,8 +535,9 @@ class ActorCritic(Policy):
         return actor_loss, policy.entropy()
 
     def critic_loss(self, latents, targets, weights):
-        dist = self.critic(latents)
-        critic_loss = -(dist.log_prob(targets) * weights)[:-1].mean()
+        dist = self.critic(latents.detach())
+        critic_loss = -(dist.log_prob(targets.detach())
+                        * weights.detach())[:-1].mean()
         return critic_loss
 
     def update_target_critic(self):
@@ -754,7 +755,13 @@ class MLP(torch.nn.Module):
         elif self.dist == 'gaussian':
             mean = logits[..., :self.out_shape]
             std = torch.log(1 + torch.exp(logits[..., self.out_shape:]))
-            dist = torch.distributions.Normal(loc=mean, scale=std)
+            try:
+                dist = torch.distributions.Normal(loc=mean, scale=std+EPS)
+            except Exception as e:
+                print(e)
+                print(std)
+                print(std.max())
+                breakpoint()
         else:
             raise ValueError()
 
