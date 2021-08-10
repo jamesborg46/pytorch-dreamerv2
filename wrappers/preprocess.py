@@ -1,4 +1,5 @@
 """Resize wrapper for gym.Env."""
+import collections
 from copy import deepcopy
 from typing import Optional
 
@@ -128,4 +129,21 @@ class Preprocess(gym.Wrapper):
     def step(self, action):
         """gym.Env step function."""
         obs, reward, done, info = self.env.step(action)
+        self.check(obs)
+        self.check(action)
         return self._observation(obs), reward, done, info
+
+    def check(self, val):
+        if type(val) == np.ndarray:
+            self._check_arr(val)
+        elif type(val) == dict or type(val) == collections.OrderedDict:
+            for k, v in val.items():
+                self._check_arr(v)
+        else:
+            raise ValueError(f"type is {type(val)}")
+
+    def _check_arr(self, arr):
+        if np.any(np.isinf(arr)):
+            raise ValueError(f"Found INF in array {arr} in environemnt")
+        if np.any(np.isnan(arr)):
+            raise ValueError(f"Found NAN in array {arr} in environemnt")

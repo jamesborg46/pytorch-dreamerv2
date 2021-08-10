@@ -8,6 +8,7 @@ import akro
 from dowel import logger
 import numpy as np
 import torch
+import torch.nn.functional as F
 from dotmap import DotMap
 from garage import EnvSpec, EpisodeBatch, StepType
 from garage.torch import global_device
@@ -314,3 +315,22 @@ def scale_img(img):
 
 def unscale_img(img):
     return (img + 0.5) * 255
+
+
+def get_dist_mode(dist):
+    if isinstance(dist, torch.distributions.OneHotCategoricalStraightThrough):
+        n = dist.probs.shape[-1]
+        return F.one_hot(torch.mode(dist.probs), n).type(torch.float)
+    elif isinstance(dist, torch.distributions.Normal):
+        return dist.mean
+    else:
+        raise NotImplementedError()
+
+
+def check_tensors(*args):
+    for t in args:
+        if torch.any(torch.isnan(t)):
+            raise ValueError(f"tensor {t} found to contain nan value")
+
+        if torch.any(torch.isinf(t)):
+            raise ValueError(f"tensor {t} found to contain inf value")

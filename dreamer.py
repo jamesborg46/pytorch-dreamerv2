@@ -18,6 +18,7 @@ from tqdm import tqdm
 import utils
 from utils import (RandomPolicy, get_config, log_action_dist_plots, segs_to_batch, log_eps_video,
                    log_reconstructions)
+import wandb
 
 scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -70,6 +71,8 @@ class Dreamer(RLAlgorithm):
 
         if human_buf is not None:
             self.example_human_actions = utils.get_human_actions(human_buf)
+            self.n_human_segs_per_batch = int(self._num_segs_per_batch
+                                              * self.human_portion)
 
     def agent_update(self):
         sampler_type = type(self._sampler)
@@ -80,9 +83,9 @@ class Dreamer(RLAlgorithm):
 
     def sample_segments(self):
         if get_config().buffer.shared_buffer:
-            n = int(self._num_segs_per_batch * self.human_portion)
-            k = self._num_segs_per_batch - n
-            human_segs = self.human_buf.sample_segments(n=n)
+            k = (self._num_segs_per_batch - self.n_human_segs_per_batch)
+            human_segs = self.human_buf.sample_segments(
+                n=self.n_human_segs_per_batch)
             policy_segs = self.buffer.sample_segments(n=k)
             segs = human_segs + policy_segs
         else:
@@ -134,14 +137,14 @@ class Dreamer(RLAlgorithm):
                 )
                 print("train time:", time.time() - start)
 
-                self.train_actor_critic_once(wm_out, self.mixed_prec)
+                self.train_actor_critic_once(wm_out, actions, self.mixed_prec)
 
                 logger.log(tabular)
                 logger.dump_all(trainer.step_itr)
                 tabular.clear()
                 trainer.step_itr += 1
 
-                if j and j % get_config().training.target_update_freq == 0:
+                if (j+1) % get_config().training.target_update_freq == 0:
                     self.agent.update_target_critic()
 
             if i and i % self.log_freq == 0:
@@ -170,8 +173,7 @@ class Dreamer(RLAlgorithm):
 
                     logger.log(f"LOG TIME: {time.time() - start}")
 
-
-    def train_actor_critic_once(self, wm_out, mixed_prec=True):
+    def train_actor_critic_once(self, wm_out, actions, mixed_prec=True):
 
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
@@ -194,12 +196,25 @@ class Dreamer(RLAlgorithm):
                 act_out['targets'],
                 act_out['weights'])
 
+            supervised_actor_loss = self.agent.supervised_actor_loss(
+                wm_out['latent_states'][:self.n_human_segs_per_batch],
+                actions=(self.world_model.embed_actions(actions)
+                         [:self.n_human_segs_per_batch])
+            )
+
+            total_actor_loss = (
+                actor_loss +
+                get_config().loss_scales.supervised_actor *
+                supervised_actor_loss
+            )
+
             critic_loss = self.agent.critic_loss(
                 act_out['latents'], act_out['targets'], act_out['weights']
             )
 
         if mixed_prec:
-            scaler.scale(actor_loss).backward(retain_graph=True)
+            # scaler.scale(actor_loss).backward(retain_graph=True)
+            scaler.scale(total_actor_loss).backward(retain_graph=True)
             scaler.scale(critic_loss).backward()
             scaler.unscale_(self.actor_optimizer)
             scaler.unscale_(self.critic_optimizer)
@@ -208,9 +223,11 @@ class Dreamer(RLAlgorithm):
             critic_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
-            self.agent.actor.parameters(), get_config().training.grad_clip)
+            self.agent.actor.parameters(), get_config().training.grad_clip,
+            error_if_nonfinite=True)
         torch.nn.utils.clip_grad_norm_(
-            self.agent.critic.parameters(), get_config().training.grad_clip)
+            self.agent.critic.parameters(), get_config().training.grad_clip,
+            error_if_nonfinite=True)
 
         if mixed_prec:
             scaler.step(self.actor_optimizer)
@@ -222,6 +239,10 @@ class Dreamer(RLAlgorithm):
 
         with tabular.prefix('actor_critic/'):
             tabular.record('actor_loss', actor_loss.cpu().item())
+            tabular.record('supervised_actor_loss',
+                           supervised_actor_loss.cpu().item())
+            tabular.record('total_actor_loss',
+                           total_actor_loss.cpu().item())
             tabular.record('actor_entropy', actor_entropy.mean().cpu().item())
             tabular.record('critic_loss', critic_loss.cpu().item())
             tabular.record_misc_stat(
@@ -262,7 +283,8 @@ class Dreamer(RLAlgorithm):
             loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
-            self.world_model.parameters(), get_config().training.grad_clip)
+            self.world_model.parameters(), get_config().training.grad_clip,
+            error_if_nonfinite=True)
 
         if mixed_prec:
             scaler.step(self.world_optimizer)

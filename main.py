@@ -22,6 +22,7 @@ from garage.sampler import DefaultWorker, LocalSampler, RaySampler, VecWorker
 from garage.torch import set_gpu_mode
 from garage.torch.optimizers import OptimizerWrapper  # noqa: F401
 from garage.trainer import Trainer
+import numpy as np
 
 from dreamer import Dreamer
 from models import ActorCritic, WorldModel, World
@@ -29,6 +30,8 @@ from replay_buffer import ReplayBuffer  # noqa: F401
 from utils import RandomPolicy, get_config, set_config
 from wrappers import MaxAndSkip, Renderer, Resize, Preprocess
 
+# torch.autograd.set_detect_anomaly(True)
+# np.seterr(all='raise')
 
 def dreamer(ctxt, gpu_id=0):
 
@@ -54,7 +57,7 @@ def dreamer(ctxt, gpu_id=0):
     env = Renderer(env, directory=os.path.join(snapshot_dir, 'videos'))
     env = GymEnv(env, max_episode_length=max_episode_length, is_image=True)
 
-    set_seed(CONFIG.training.seed)
+    # set_seed(CONFIG.training.seed)
 
     with open(os.path.join(snapshot_dir, 'env.pkl'), 'wb') as outfile:
         pickle.dump(env, outfile)

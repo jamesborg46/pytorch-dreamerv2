@@ -12,12 +12,14 @@ from torch import distributions, nn
 from torch._six import inf
 from torch.distributions import Independent, kl_divergence
 from torch.distributions.utils import logits_to_probs
-from utils import scale_img
+from utils import scale_img, get_dist_mode, check_tensors
+
+EPS = 1e-9
 
 
 def categorical_kl(logits_p, logits_q):
-    probs_p = logits_to_probs(logits_p)
-    probs_q = logits_to_probs(logits_q)
+    probs_p = logits_to_probs(logits_p) + EPS
+    probs_q = logits_to_probs(logits_q) + EPS
     t = probs_p * (logits_p - logits_q)
     t[(probs_q == 0).expand_as(t)] = inf
     t[(probs_p == 0).expand_as(t)] = 0
@@ -40,6 +42,14 @@ def kl_loss(posterior, prior, config):
     if not torch.isclose(lhs, expected, atol=1e-5).all():
         max_dif = torch.max(torch.abs(lhs - expected)).cpu().item()
         logger._warn(f'LHS and RHS of KL differ by: {max_dif}')
+
+    try:
+        check_tensors(posterior.logits,
+                      prior.logits,
+                      lhs, rhs, kl_loss)
+    except Exception as e:
+        print(e)
+        breakpoint()
 
     return kl_loss
 
@@ -101,6 +111,12 @@ class WorldModel(torch.nn.Module):
             units=self.config.discount_head.units,
             dist='bernoulli')
 
+    def set_action_stats(self, mean, std):
+        self.action_mean = torch.tensor(
+            mean, device=global_device(), dtype=torch.float)
+        self.action_std = torch.tensor(
+            std, device=global_device(), dtype=torch.float)
+
     # def reconstruct(self, observations, actions):
     #     steps, channels, height, width = observations.shape
     #     embedded_observations = self.image_encoder(
@@ -137,37 +153,64 @@ class WorldModel(torch.nn.Module):
                 flattened_images).reshape(segs, steps, -1)
         else:
             raise ValueError()
+
+        try:
+            check_tensors(images, embedded_images)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return embedded_images
 
     def embed_observations(self, observations):
         if self.world_type == World.ATARI:
-            return self.encode_images(observations['pov'])
+            embedded_observations = self.encode_images(observations['pov'])
 
         elif self.world_type == World.DIAMOND:
             embedded_pov = self.encode_images(observations['pov'])
             embedded_observations = torch.cat(
                 [embedded_pov, observations['vector']],
                 dim=-1)
-            return embedded_observations
 
         elif self.world_type == World.BASALT:
             raise NotImplementedError()
 
         else:
             raise ValueError()
+
+        try:
+            check_tensors(*observations.values(), embedded_observations)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
+        return embedded_observations
+
 
     def embed_actions(self, actions):
         if self.world_type == World.ATARI:
-            return actions
-
+            pass
         elif self.world_type == World.DIAMOND:
-            return actions['vector']
+            if self.config.training.scale_action_dist:
+                actions = (
+                    (actions['vector'] - self.action_mean) / self.action_std
+                )
+            else:
+                actions = actions['vector']
 
         elif self.world_type == World.BASALT:
             raise NotImplementedError()
 
         else:
             raise ValueError()
+
+        try:
+            check_tensors(actions)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
+        return actions
 
     def reconstruct_observations(self, latent_states: torch.Tensor) \
             -> Dict[str, torch.distributions.Distribution]:
@@ -195,6 +238,12 @@ class WorldModel(torch.nn.Module):
             assert vector_recon_dist.batch_shape == (segs, steps) and \
                 vector_recon_dist.event_shape == (64, )
             recon_obs['vector_recon_dist'] = vector_recon_dist
+
+        try:
+            check_tensors(latent_states)
+        except Exception as e:
+            print(e)
+            breakpoint()
 
         return recon_obs
 
@@ -237,6 +286,15 @@ class WorldModel(torch.nn.Module):
         latents = torch.stack(latents)
         rewards = self.reward_predictor(latents).mean
         discounts = self.discount_predictor(latents).mean
+
+        try:
+            check_tensors(initial_stoch,
+                          initial_deter,
+                          latents, rewards, discounts, actions
+                          )
+        except Exception as e:
+            print(e)
+            breakpoint()
 
         return actions, latents, rewards, discounts
 
@@ -283,6 +341,15 @@ class WorldModel(torch.nn.Module):
         }
         out['latent_states'] = self.get_latent_state(
             out['posterior_samples'], out['deters'])
+
+        try:
+            check_tensors(embedded_observations,
+                          actions,
+                          *out.values()
+                          )
+        except Exception as e:
+            print(e)
+            breakpoint()
 
         return out
 
@@ -336,6 +403,17 @@ class WorldModel(torch.nn.Module):
             'reward_mae': reward_mae,
             'discount_mae': discount_mae,
         })
+
+        try:
+            check_tensors(*observation_batch.values(),
+                          reward_batch,
+                          discount_batch,
+                          *loss_info.values()
+                          )
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return loss, loss_info
 
 
@@ -404,6 +482,13 @@ class ActorCritic(Policy):
         )
 
         self.deter = None  # initialised in self.reset()
+        self.mode = 'train'
+
+    def eval(self):
+        self.mode = 'eval'
+
+    def train(self):
+        self.mode = 'train'
 
     @property
     def initial_state(self):
@@ -413,6 +498,11 @@ class ActorCritic(Policy):
         if self.world_type == World.ATARI:
             return torch.argmax(action, dim=-1).item()
         elif self.world_type == World.DIAMOND:
+            if self.config.training.scale_action_dist:
+                action = (
+                    action * self.world_model.action_std
+                    + self.world_model.action_mean
+                )
             return {'vector': np.clip(action.cpu().numpy(),
                                       a_min=-1.05,
                                       a_max=1.05)}
@@ -448,12 +538,25 @@ class ActorCritic(Policy):
             latent_state = self.world_model.get_latent_state(
                 stoch, self.deter)
 
-            action = self.actor(latent_state).rsample().unsqueeze(0)
+            if self.mode == 'train':
+                action = self.actor(latent_state).rsample().unsqueeze(0)
+            elif self.mode == 'eval':
+                action = get_dist_mode(self.actor(latent_state)).unsqueeze(0)
+            else:
+                raise ValueError
 
             _, deter = self.world_model.rssm.imagine_step(
                 stoch, self.deter, action)
 
             self.deter = deter
+
+        try:
+            check_tensors(*observation.values(),
+                          action,
+                          )
+        except Exception as e:
+            print(e)
+            breakpoint()
 
         return self.pack_action(action[0]), {}
 
@@ -493,6 +596,21 @@ class ActorCritic(Policy):
             'weights': weights,
         }
 
+        try:
+            check_tensors(initial_stoch,
+                          initial_deter,
+                          actions,
+                          latents,
+                          rewards,
+                          discounts,
+                          values,
+                          values_t,
+                          targets,
+                          weights)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return out
 
     def lambda_return(self, values_t, rewards, discounts, lam):
@@ -515,7 +633,31 @@ class ActorCritic(Policy):
             prev_return = lambda_return
 
         lambda_returns = torch.flip(torch.stack(returns_reversed), dims=[0])
+
+        try:
+            check_tensors(values_t,
+                          rewards,
+                          discounts,
+                          lambda_returns)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return lambda_returns
+
+    def supervised_actor_loss(self, latents, actions):
+        policy = self.actor(latents[:, :-1].detach())
+        supervised_actor_loss = -policy.log_prob(actions[:, 1:].detach()).mean()
+
+        try:
+            check_tensors(latents,
+                          actions,
+                          supervised_actor_loss)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
+        return supervised_actor_loss
 
     def actor_loss(self, latents, values, action, target, weights):
         policy = self.actor(latents.detach())
@@ -532,12 +674,34 @@ class ActorCritic(Policy):
         ent_scale = self.config.actor.ent_scale
         objective += ent_scale * policy.entropy()
         actor_loss = -(objective * weights)[:-1].mean()
+
+        try:
+            check_tensors(latents,
+                          values,
+                          action,
+                          target,
+                          weights,
+                          actor_loss)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return actor_loss, policy.entropy()
 
     def critic_loss(self, latents, targets, weights):
         dist = self.critic(latents.detach())
         critic_loss = -(dist.log_prob(targets.detach())
                         * weights.detach())[:-1].mean()
+
+        try:
+            check_tensors(latents,
+                          targets,
+                          weights,
+                          critic_loss)
+        except Exception as e:
+            print(e)
+            breakpoint()
+
         return critic_loss
 
     def update_target_critic(self):
@@ -635,7 +799,6 @@ class RSSM(torch.nn.Module):
             self.stoch_state_size,
             self.stoch_state_classes
         )
-        # prior = StraightThroughOneHotDist(logits=logits)
         prior = torch.distributions.OneHotCategoricalStraightThrough(
             logits=logits)
         return prior, deter
@@ -649,7 +812,6 @@ class RSSM(torch.nn.Module):
             self.stoch_state_size,
             self.stoch_state_classes
         )
-        # posterior = StraightThroughOneHotDist(logits=logits)
         posterior = torch.distributions.OneHotCategoricalStraightThrough(
             logits=logits)
         return posterior
@@ -756,7 +918,7 @@ class MLP(torch.nn.Module):
             mean = logits[..., :self.out_shape]
             std = torch.log(1 + torch.exp(logits[..., self.out_shape:]))
             try:
-                dist = torch.distributions.Normal(loc=mean, scale=std+EPS)
+                dist = torch.distributions.Normal(loc=mean, scale=std+0.01)
             except Exception as e:
                 print(e)
                 print(std)
