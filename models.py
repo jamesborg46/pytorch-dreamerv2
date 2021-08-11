@@ -389,8 +389,9 @@ class ActorCritic(Policy):
         return actor_loss, policy.entropy()
 
     def critic_loss(self, latents, targets, weights):
-        dist = self.critic(latents)
-        critic_loss = -(dist.log_prob(targets) * weights)[:-1].mean()
+        dist = self.critic(latents.detach())
+        critic_loss = -(dist.log_prob(targets.detach())
+                        * weights.detach())[:-1].mean()
         return critic_loss
 
     def update_target_critic(self):
