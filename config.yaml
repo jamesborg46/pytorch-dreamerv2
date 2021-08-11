@@ -8,17 +8,17 @@ defaults:
     sampler: "ray"
     num_segs_per_batch: 50
     seg_length: 50
-    num_training_steps: 800 
+    num_training_steps: 300 
     # seed_episodes: 2
     grad_clip: 100
     max_episode_length: null 
-    target_update_freq: 50
+    target_update_freq: 100
     buf_capacity: 2e6
     
 
   samplers:
     agent:
-      n: 4
+      n: 6
       eps: 1
 
     log:
@@ -76,7 +76,7 @@ defaults:
     Activation: "torch.nn.ELU"
 
   image:
-    color_channels: 3
+    color_channels: 1
     height: 64
     width: 64
 
@@ -145,7 +145,7 @@ debug:
     Activation: "torch.nn.ELU"
 
   image:
-    color_channels: 3
+    color_channels: 1
     height: 64
     width: 64
 

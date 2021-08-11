@@ -141,7 +141,7 @@ class Dreamer(RLAlgorithm):
                 tabular.clear()
                 trainer.step_itr += 1
 
-                if j and j % get_config().training.target_update_freq == 0:
+                if (j+1) % get_config().training.target_update_freq == 0:
                     self.agent.update_target_critic()
 
             if i and i % self.log_freq == 0:
