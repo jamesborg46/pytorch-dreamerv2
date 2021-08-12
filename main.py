@@ -50,7 +50,7 @@ def dreamer(ctxt, gpu_id=0):
     #     env = Grayscale(env)
     # env = Resize(env, CONFIG.image.height, CONFIG.image.height)
     # env = Preprocess(env, world_type=World.ATARI, grayscale=True)
-    env = Preprocess(env, world_type=World.ATARI, grayscale=True)
+    env = Preprocess(env, world_type=World.ATARI, grayscale=False)
     env = Renderer(env, directory=os.path.join(snapshot_dir, 'videos'))
     env = GymEnv(env, max_episode_length=max_episode_length, is_image=True)
 

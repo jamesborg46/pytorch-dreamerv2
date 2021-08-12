@@ -151,16 +151,16 @@ class Dreamer(RLAlgorithm):
                     logger.log('LOGGING')
                     start = time.time()
 
-#                     log_eps_video(
-#                         eps=eps,
-#                         log_dir=video_dir,
-#                         itr=trainer.step_itr
-#                     )
+                    log_eps_video(
+                        eps=eps,
+                        log_dir=video_dir,
+                        itr=trainer.step_itr
+                    )
 
-#                     log_reconstructions(obs,
-#                                         wm_out,
-#                                         log_dir=video_dir,
-#                                         itr=trainer.step_itr)
+                    log_reconstructions(obs,
+                                        wm_out,
+                                        log_dir=video_dir,
+                                        itr=trainer.step_itr)
 
                     if self.human_buf is not None:
                         policy_actions = utils.get_policy_actions(eps)

@@ -76,7 +76,7 @@ defaults:
     Activation: "torch.nn.ELU"
 
   image:
-    color_channels: 1
+    color_channels: 3
     height: 64
     width: 64
 
@@ -145,7 +145,7 @@ debug:
     Activation: "torch.nn.ELU"
 
   image:
-    color_channels: 1
+    color_channels: 3
     height: 64
     width: 64
 
