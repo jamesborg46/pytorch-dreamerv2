@@ -309,8 +309,10 @@ class RandomPolicy(Policy):
 
 
 def scale_img(img):
-    return img / 255. - 0.5
+    # return img / 255. - 0.5
+    return (2*img) / 255. - 1
 
 
 def unscale_img(img):
-    return (img + 0.5) * 255
+    # return (img + 0.5) * 255
+    return (img + 1.) * (255/2)

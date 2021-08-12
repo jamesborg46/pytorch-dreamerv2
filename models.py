@@ -707,6 +707,7 @@ class ImageDecoder(torch.nn.Module):
             Activation(),
             nn.ConvTranspose2d(N, self.shape[-1], 6, 2),
             # nn.Sigmoid(),  # TODO: Check this
+            nn.Tanh(),  # TODO: Check this
         )
 
     def forward(self, embed):
