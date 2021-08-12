@@ -96,6 +96,8 @@ def dreamer(ctxt, gpu_id=0):
         set_gpu_mode(True, gpu_id=gpu_id)
         mixed_prec = True
 
+    mixed_prec = False
+
     algo = Dreamer(
         env.spec,
         sampler=sampler,

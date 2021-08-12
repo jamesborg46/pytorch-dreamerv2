@@ -19,7 +19,7 @@ import utils
 from utils import (RandomPolicy, get_config, log_action_dist_plots, segs_to_batch, log_eps_video,
                    log_reconstructions)
 
-scaler = torch.cuda.amp.GradScaler(enabled=True)
+# scaler = torch.cuda.amp.GradScaler(enabled=True)
 
 
 class Dreamer(RLAlgorithm):
@@ -179,10 +179,13 @@ class Dreamer(RLAlgorithm):
         context = autocast() if mixed_prec else nullcontext()
         with context:
 
-            initial_stoch = wm_out['posterior_samples'].reshape(
+            # We remove last timestep before reshaping as this may be a
+            # terminal state
+            initial_stoch = wm_out['posterior_samples'][:, :-1].reshape(
                 -1, get_config().rssm.stoch_state_size,
                 get_config().rssm.stoch_state_classes).detach()
-            initial_deter = wm_out['deters'].reshape(
+
+            initial_deter = wm_out['deters'][:, :-1].reshape(
                 -1, get_config().rssm.det_state_size).detach()
 
             act_out = self.agent(initial_stoch, initial_deter)
