@@ -2,6 +2,7 @@ from enum import Enum, auto
 from typing import Callable, Union, Optional, Dict
 
 import akro
+import copy
 import gym
 import torch
 from dowel import logger
@@ -48,6 +49,7 @@ class World(Enum):
     ATARI = auto()
     DIAMOND = auto()
     BASALT = auto()
+    INTRO = auto()
 
 
 class WorldModel(torch.nn.Module):
@@ -68,7 +70,7 @@ class WorldModel(torch.nn.Module):
         )
 
         obs_space = env_spec.observation_space
-        if world_type == World.ATARI:
+        if world_type in [World.ATARI, World.INTRO]:
             assert type(obs_space) == akro.Dict and \
                 obs_space.spaces.keys() == set(['pov'])
         elif world_type == World.DIAMOND:
@@ -140,7 +142,7 @@ class WorldModel(torch.nn.Module):
         return embedded_images
 
     def embed_observations(self, observations):
-        if self.world_type == World.ATARI:
+        if self.world_type in [World.ATARI, World.INTRO]:
             return self.encode_images(observations['pov'])
 
         elif self.world_type == World.DIAMOND:
@@ -156,12 +158,51 @@ class WorldModel(torch.nn.Module):
         else:
             raise ValueError()
 
+    def pack_action(self, action):
+        if self.world_type == World.ATARI:
+            return torch.argmax(action, dim=-1).item()
+        elif self.world_type == World.DIAMOND:
+            return {'vector': np.clip(action.cpu().numpy(),
+                                      a_min=-1.05,
+                                      a_max=1.05)}
+        elif self.world_type == World.INTRO:
+            assert action.shape[-1] == 10
+            action = {
+                'attack': action[..., 0].type(torch.int).cpu().item(),
+                'back': action[..., 1].type(torch.int).cpu().item(),
+                'forward': action[..., 2].type(torch.int).cpu().item(),
+                'jump': action[..., 3].type(torch.int).cpu().item(),
+                'left':  action[..., 4].type(torch.int).cpu().item(),
+                'right': action[..., 5].type(torch.int).cpu().item(),
+                'sneak': action[..., 6].type(torch.int).cpu().item(),
+                'sprint': action[..., 7].type(torch.int).cpu().item(),
+                'camera': action[..., 8:].cpu().numpy(),
+            }
+            return action
+
+        elif self.world_type == World.BASALT:
+            raise NotImplementedError()
+        else:
+            raise ValueError()
+
     def embed_actions(self, actions):
         if self.world_type == World.ATARI:
             return actions
 
         elif self.world_type == World.DIAMOND:
             return actions['vector']
+
+        elif self.world_type == World.INTRO:
+            keys = sorted(actions.keys())
+            assert keys == ['attack', 'back', 'camera', 'forward', 'jump',
+                            'left', 'right', 'sneak', 'sprint']
+            actions = torch.cat(
+                    [actions[k].unsqueeze(-1) for k in keys if k != 'camera']
+                    + [actions['camera']],
+                    dim=-1
+                )
+            assert actions.shape[-1] == 10
+            return actions
 
         elif self.world_type == World.BASALT:
             raise NotImplementedError()
@@ -299,7 +340,7 @@ class WorldModel(torch.nn.Module):
         reward_loss = -out['reward_dist'].log_prob(reward_batch).mean()
         discount_loss = -out['discount_dist'].log_prob(discount_batch).mean()
 
-        recon_loss = (
+        recon_loss = self.config.loss_scales.recon_pov * (
             -out['recon_obs']['image_recon_dist']
             .log_prob(scale_img(observation_batch['pov'])).mean()
         )
@@ -307,7 +348,7 @@ class WorldModel(torch.nn.Module):
         if self.world_type == World.DIAMOND:
             vector_scale = self.config.loss_scales.recon_vector
             image_recon_loss = recon_loss
-            vector_recon_loss = (
+            vector_recon_loss = self.config.loss_scales.recon_vector * (
                 vector_scale * -out['recon_obs']['vector_recon_dist']
                 .log_prob(observation_batch['vector']).mean()
             )
@@ -323,7 +364,7 @@ class WorldModel(torch.nn.Module):
         loss = (
             self.config.loss_scales.reward * reward_loss +
             self.config.loss_scales.discount * discount_loss +
-            self.config.loss_scales.recon * recon_loss +
+            recon_loss +
             self.config.loss_scales.kl * kl_loss
         )
 
@@ -378,6 +419,17 @@ class ActorCritic(Policy):
             ind_dims = 1
             scale = None
 
+        elif world_type == World.INTRO:
+            assert type(obs_space) == akro.Dict and \
+                type(env_spec.action_space) == akro.Dict
+            assert env_spec.action_space.spaces.keys() == set(
+                ['attack', 'back', 'camera', 'forward', 'jump', 'left', 'right',
+                 'sneak', 'sprint']), f"{env_spec.action_space.spaces.keys()}"
+            self.action_size = 10
+            actor_dist = 'intro'
+            ind_dims = None
+            scale = None
+
         elif world_type == World.BASALT:
             raise NotImplementedError()
         else:
@@ -408,19 +460,6 @@ class ActorCritic(Policy):
     @property
     def initial_state(self):
         return self.world_model.rssm.initial_state(self.n_envs)
-
-    def pack_action(self, action):
-        if self.world_type == World.ATARI:
-            return torch.argmax(action, dim=-1).item()
-        elif self.world_type == World.DIAMOND:
-            return {'vector': np.clip(action.cpu().numpy(),
-                                      a_min=-1.05,
-                                      a_max=1.05)}
-        elif self.world_type == World.BASALT:
-            raise NotImplementedError()
-        else:
-            raise ValueError()
-
     def get_action(self, observation):
         # if self.random:
         #     action_space = self.action_size
@@ -431,7 +470,7 @@ class ActorCritic(Policy):
 
         with torch.no_grad():
             observation = {
-                k: torch.tensor(v, device=global_device(), dtype=torch.float)
+                k: torch.tensor(copy.copy(v), device=global_device(), dtype=torch.float)
                 for k, v in observation.items()
             }
 
@@ -455,7 +494,7 @@ class ActorCritic(Policy):
 
             self.deter = deter
 
-        return self.pack_action(action[0]), {}
+        return self.world_model.pack_action(action[0]), {}
 
     def get_actions(self, observations):
         pass
@@ -554,17 +593,19 @@ class RSSM(torch.nn.Module):
         self._env_spec = env_spec
         self.config = config
 
-        if type(env_spec.action_space) == akro.Dict:
+        if world_type == World.DIAMOND:
             self.action_size = env_spec.action_space.flat_dim
-        elif type(env_spec.action_space) == akro.Discrete:
+        elif world_type == World.ATARI:
             self.action_size = env_spec.action_space.n
+        elif world_type == World.INTRO:
+            self.action_size = 10
         else:
             raise ValueError()
 
         obs_space = env_spec.observation_space
-        if world_type == World.ATARI:
+        if world_type in [World.ATARI, World.INTRO]:
             self.embed_size = self.config.image_encoder.N * 32
-        elif world_type == World.DIAMOND:
+        elif world_type in [World.DIAMOND]:
             self.embed_size = self.config.image_encoder.N * 32 + 64
         elif world_type == World.BASALT:
             raise NotImplementedError()
@@ -762,6 +803,11 @@ class MLP(torch.nn.Module):
                 print(std)
                 print(std.max())
                 breakpoint()
+        elif self.dist == 'intro':
+            binary_probs = torch.nn.functional.sigmoid(logits[..., :8])
+            camera_vals = logits[..., -2:]
+            dist = IntroTrackDistribution(probs=binary_probs,
+                                          camera_vals=camera_vals)
         else:
             raise ValueError()
 
@@ -777,3 +823,68 @@ class MLP(torch.nn.Module):
         init = torch.cat([mean, rho])
         with torch.no_grad():
             self.net.out_layer.bias.data = torch.nn.Parameter(init)
+
+
+class BernoulliStraightThrough(torch.distributions.Bernoulli):
+
+    has_rsample = True
+
+    def rsample(self, sample_shape=torch.Size()):
+        samples = self.sample(sample_shape)
+        return samples + (self.probs - self.probs.detach())
+
+
+class TruncNormalDist(torch.distributions.Normal):
+
+    def __init__(self, loc, scale, low, high, validate_args=None):
+        super().__init__(loc, scale, validate_args)
+        self._low = low
+        self._high = high
+
+    def sample(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def rsample(self, *args, **kwargs):
+        event = super().rsample(*args, **kwargs)
+        clipped = torch.clip(event, min=self._low, max=self._high)
+        event = event - event.detach() + clipped.detach()
+        return event
+
+
+class IntroTrackDistribution(torch.distributions.Distribution):
+
+    def __init__(self, probs, camera_vals):
+        self.binary_dist = torch.distributions.Independent(
+            BernoulliStraightThrough(
+                probs=probs),
+            reinterpreted_batch_ndims=1
+        )
+
+        self.camera_dist = torch.distributions.Independent(
+            TruncNormalDist(
+                loc=camera_vals,
+                scale=1.,
+                low=-180.,
+                high=180.),
+            reinterpreted_batch_ndims=1)
+
+
+    def entropy(self):
+        return self.binary_dist.entropy() + self.camera_dist.entropy()
+
+    def log_prob(self, actions):
+        binary_vals = actions[..., :8]
+        camera_vals = actions[..., -2:]
+        return self.binary_dist.log_prob(binary_vals) + \
+            self.camera_dist.log_prob(camera_vals)
+
+    def sample(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def rsample(self, *args, **kwargs):
+        binary_samples = self.binary_dist.rsample(*args, **kwargs)
+        camera_samples = self.camera_dist.rsample(*args, **kwargs)
+        sample = torch.cat([binary_samples, camera_samples], dim=-1)
+        return sample
+
+

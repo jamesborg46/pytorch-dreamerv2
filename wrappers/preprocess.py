@@ -52,7 +52,7 @@ class Preprocess(gym.Wrapper):
                 ),
             })
 
-        elif world_type in [World.DIAMOND, World.BASALT]:
+        elif world_type in [World.DIAMOND, World.BASALT, World.INTRO]:
             assert isinstance(obs_space, gym.spaces.Dict)
             assert isinstance(obs_space['pov'], gym.spaces.Box)
             assert (obs_space['pov'].low == 0).all() and \
@@ -115,7 +115,7 @@ class Preprocess(gym.Wrapper):
     def _observation(self, obs):
         if self._world_type == World.ATARI:
             obs = {'pov': self._preprocess_img(obs)}
-        elif self._world_type == World.DIAMOND or self._world_type == World.BASALT:
+        elif self._world_type in [World.DIAMOND, World.BASALT, World.INTRO]:
             obs['pov'] = self._preprocess_img(obs['pov'])
         else:
             raise ValueError()

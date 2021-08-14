@@ -243,18 +243,16 @@ def minerl_seq_to_ep(seq, spec):
     return ep
 
 
-def load_human_data_buffer(env_name: str, spec: EnvSpec):
+def load_human_data_buffer(env_name: str, spec: EnvSpec, load=False):
     data_root = os.environ.get('MINERL_DATA_ROOT')
     buffer_path = osp.join(data_root, env_name, "buffer.pkl")  # type: ignore
     human_reward_bias = get_config().buffer.human_reward_bias
 
-    # if osp.exists(buffer_path) and human_reward_bias == 0:
-    #     logger.log('Loading existing human dataset buffer')
-    #     with open(buffer_path, 'rb') as f:
-    #         buf = pickle.load(f)
-    #     return buf
-    # else:
-    #     logger.log('No human dataset buffer found')
+    if osp.exists(buffer_path) and human_reward_bias == 0 and load:
+        logger.log('Loading existing human dataset buffer')
+        with open(buffer_path, 'rb') as f:
+            buf = pickle.load(f)
+        return buf
 
     logger.log('Creating human dataset buffer...')
     data = minerl.data.make(env_name)
@@ -266,9 +264,11 @@ def load_human_data_buffer(env_name: str, spec: EnvSpec):
         seq = data._load_data_pyfunc(path, -1, None)
         buf.collect(minerl_seq_to_ep(seq, spec))
 
-    # logger.log('Saving human dataset buffer...')
-    # with open(buffer_path, 'wb') as f:
-    #     pickle.dump(buf, f)
+    logger.log(f'{buf._total_steps} total steps in dataset')
+
+    logger.log('Saving human dataset buffer...')
+    with open(buffer_path, 'wb') as f:
+        pickle.dump(buf, f)
 
     return buf
 

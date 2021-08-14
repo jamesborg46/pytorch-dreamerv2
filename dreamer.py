@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from typing import Union, Optional
 
 import models
+from models import World
 import numpy as np
 import replay_buffer
 import torch
@@ -68,7 +69,7 @@ class Dreamer(RLAlgorithm):
             eps=get_config().critic.eps,
             weight_decay=get_config().critic.wd)
 
-        if human_buf is not None:
+        if human_buf is not None and world_model.world_type == World.DIAMOND:
             self.example_human_actions = utils.get_human_actions(human_buf)
 
     def agent_update(self):
@@ -151,18 +152,19 @@ class Dreamer(RLAlgorithm):
                     logger.log('LOGGING')
                     start = time.time()
 
-#                     log_eps_video(
-#                         eps=eps,
-#                         log_dir=video_dir,
-#                         itr=trainer.step_itr
-#                     )
+                    log_eps_video(
+                        eps=eps,
+                        log_dir=video_dir,
+                        itr=trainer.step_itr
+                    )
 
-#                     log_reconstructions(obs,
-#                                         wm_out,
-#                                         log_dir=video_dir,
-#                                         itr=trainer.step_itr)
+                    log_reconstructions(obs,
+                                        wm_out,
+                                        log_dir=video_dir,
+                                        itr=trainer.step_itr)
 
-                    if self.human_buf is not None:
+                    if self.human_buf is not None and \
+                            self.world_model.world_type == World.DIAMOND:
                         policy_actions = utils.get_policy_actions(eps)
                         log_action_dist_plots(self.example_human_actions,
                                               policy_actions,

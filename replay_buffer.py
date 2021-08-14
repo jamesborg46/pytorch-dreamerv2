@@ -135,7 +135,7 @@ class ReplayBuffer(abc.ABC):
         sampled_episodes = [episodes[i] for i in idxs]
         return sampled_episodes
 
-    def sample_segments(self, n=1):
+    def sample_segments(self, n):
         episodes = self.sample_episodes(n=n)
         segments = []
         for ep in episodes:
